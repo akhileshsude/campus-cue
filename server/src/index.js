@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import supabase from './supabaseClient.js';
 import { sampleEmails, sampleDigest, sampleReminders } from './sampleData.js';
-import { processEmail } from '../services/emailProcessor.js';
+import { processEmail, generateAcademicDigest, generateReplyDraft } from '../services/emailProcessor.js';
 
 dotenv.config();
 
@@ -17,6 +17,7 @@ app.use(express.json());
 // In-memory state initialized with sample data (for mock mode)
 let memoryEmails = [...sampleEmails];
 let memoryReminders = [...sampleReminders];
+let memoryDigest = { ...sampleDigest };
 
 // Helper to resolve effective category (user override takes priority)
 function getEffectiveCategory(email) {
@@ -88,8 +89,9 @@ app.get('/api/emails', async (req, res) => {
 });
 
 // 3. Process an email with Gemini AI (POST /api/emails/process)
+// Also supports ingesting new raw emails via save_as_new: true
 app.post('/api/emails/process', async (req, res) => {
-  const { id, subject, body, sender, received_at } = req.body;
+  const { id, subject, body, sender, received_at, save_as_new } = req.body;
 
   try {
     let targetEmail = null;
@@ -105,7 +107,7 @@ app.post('/api/emails/process', async (req, res) => {
     const emailToProcess = {
       subject: subject || targetEmail?.subject || '',
       body: body || targetEmail?.body || '',
-      sender: sender || targetEmail?.sender || 'Unknown Sender',
+      sender: sender || targetEmail?.sender || 'Unknown Sender <sender@university.edu>',
       receivedAt: received_at || targetEmail?.received_at || new Date().toISOString(),
     };
 
@@ -153,7 +155,6 @@ app.post('/api/emails/process', async (req, res) => {
         }
       }
 
-      // Sync with Supabase if connected
       if (supabase) {
         try {
           await supabase.from('emails').upsert(updated);
@@ -169,7 +170,64 @@ app.post('/api/emails/process', async (req, res) => {
       });
     }
 
-    // New ad-hoc email processed
+    // If saving as a brand new ingested email
+    if (save_as_new) {
+      const newId = `cue-ingest-${Date.now()}`;
+      const senderName = emailToProcess.sender.includes('<')
+        ? emailToProcess.sender.split('<')[0].trim()
+        : emailToProcess.sender;
+
+      const newEmail = {
+        id: newId,
+        sender: emailToProcess.sender,
+        senderName: senderName || 'New Correspondence',
+        subject: emailToProcess.subject,
+        body: emailToProcess.body,
+        category: aiResult.category,
+        user_category: null,
+        summary: aiResult.summary,
+        priority: aiResult.priority,
+        priority_reason: aiResult.priority_reason,
+        received_at: emailToProcess.receivedAt,
+        deadline: aiResult.deadline,
+        deadline_label: aiResult.deadline ? 'Action Deadline' : null,
+        deadline_confidence: aiResult.deadline_confidence,
+        required_action: aiResult.required_action,
+        needs_followup: aiResult.needs_followup,
+        is_read: false,
+        ai_processed: true,
+      };
+
+      memoryEmails.unshift(newEmail);
+
+      if (aiResult.needs_followup) {
+        memoryReminders.unshift({
+          id: `rem-${newId}`,
+          emailId: newId,
+          subject: newEmail.subject,
+          sender: newEmail.senderName,
+          action: aiResult.required_action || 'Reply required',
+          deadline: aiResult.deadline,
+          is_completed: false,
+        });
+      }
+
+      if (supabase) {
+        try {
+          await supabase.from('emails').insert(newEmail);
+        } catch (dbErr) {
+          console.warn('⚠️ Supabase insert error:', dbErr.message);
+        }
+      }
+
+      return res.json({
+        message: 'Email ingested and analyzed successfully',
+        email: newEmail,
+        aiResult,
+      });
+    }
+
+    // New ad-hoc email analyzed
     res.json({
       message: 'Email analyzed successfully with AI',
       aiResult,
@@ -211,7 +269,6 @@ app.post('/api/emails/process-all', async (req, res) => {
       memoryEmails[i] = updated;
       results.push(updated);
 
-      // Brief pause to respect API rate limits
       await new Promise(r => setTimeout(r, 200));
     }
 
@@ -256,15 +313,65 @@ app.patch('/api/emails/:id/category', async (req, res) => {
   });
 });
 
-// 6. Daily Academic Digest
+// 6. Dynamic Academic Digest Generation (POST /api/digest/generate)
+app.post('/api/digest/generate', async (req, res) => {
+  try {
+    const academicEmails = memoryEmails.filter(e =>
+      getEffectiveCategory(e).toLowerCase() === 'academics'
+    );
+
+    console.log(`🤖 Generating dynamic academic digest from ${academicEmails.length} course emails...`);
+    const digest = await generateAcademicDigest(academicEmails);
+    memoryDigest = digest;
+
+    res.json({
+      message: 'Academic digest generated successfully',
+      digest,
+    });
+  } catch (err) {
+    console.error('Error generating academic digest:', err);
+    res.status(500).json({ error: 'Failed to generate academic digest', details: err.message });
+  }
+});
+
+// 7. Get Current Daily Academic Digest
 app.get('/api/digest', (req, res) => {
   res.json({
-    digest: sampleDigest,
-    source: 'sample_data',
+    digest: memoryDigest,
+    source: memoryDigest._source || 'sample_data',
   });
 });
 
-// 7. Reminders & follow-ups
+// 8. Smart AI Reply Drafter (POST /api/emails/reply)
+app.post('/api/emails/reply', async (req, res) => {
+  const { id, intent, studentNotes, studentName, email: providedEmail } = req.body;
+
+  let targetEmail = memoryEmails.find(e => e.id === id) || providedEmail;
+
+  if (!targetEmail) {
+    return res.status(404).json({ error: 'Email not found to draft reply' });
+  }
+
+  try {
+    console.log(`🤖 Drafting reply for "${targetEmail.subject.slice(0, 35)}..." with intent "${intent || 'polite_confirm'}"`);
+    const draft = await generateReplyDraft({
+      subject: targetEmail.subject,
+      body: targetEmail.body,
+      sender: targetEmail.sender,
+      action: targetEmail.required_action || targetEmail.followup_action,
+      intent: intent || 'polite_confirm',
+      studentNotes: studentNotes || '',
+      studentName: studentName || '',
+    });
+
+    res.json(draft);
+  } catch (err) {
+    console.error('Error drafting reply:', err);
+    res.status(500).json({ error: 'Failed to generate reply draft', details: err.message });
+  }
+});
+
+// 9. Reminders & follow-ups
 app.get('/api/reminders', (req, res) => {
   res.json({
     reminders: memoryReminders,
@@ -272,7 +379,7 @@ app.get('/api/reminders', (req, res) => {
   });
 });
 
-// 8. Toggle reminder status (Mark done)
+// 10. Toggle reminder status (Mark done)
 app.patch('/api/reminders/:id', (req, res) => {
   const { id } = req.params;
   const { is_completed } = req.body;
@@ -291,7 +398,7 @@ app.patch('/api/reminders/:id', (req, res) => {
   });
 });
 
-// 9. Mark email read/unread
+// 11. Mark email read/unread
 app.patch('/api/emails/:id/read', (req, res) => {
   const { id } = req.params;
   const { is_read } = req.body;
@@ -316,4 +423,6 @@ app.listen(PORT, () => {
   console.log(`📡 Health-check: http://localhost:${PORT}/api/health`);
   console.log(`✉️  Emails API:  http://localhost:${PORT}/api/emails`);
   console.log(`🤖 AI Processor: http://localhost:${PORT}/api/emails/process`);
+  console.log(`📝 AI Reply:     http://localhost:${PORT}/api/emails/reply`);
+  console.log(`📰 AI Digest:    http://localhost:${PORT}/api/digest/generate`);
 });

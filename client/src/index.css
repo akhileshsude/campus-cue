@@ -3,83 +3,72 @@
 @tailwind utilities;
 
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #E8ECF4 0%, #ECEEF5 50%, #F1EEF6 100%);
-  color: #1F2937;
+  background-color: #F1EBDD;
+  /* Subtle organic paper texture */
+  background-image: 
+    radial-gradient(circle at 100% 0%, rgba(196, 162, 101, 0.03) 0%, transparent 25%),
+    radial-gradient(circle at 0% 100%, rgba(31, 58, 46, 0.03) 0%, transparent 25%);
+  color: #1A2B22;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Base Glass Surface */
-.glass {
-  background-color: rgba(255, 255, 255, 0.5);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  border-radius: 1rem; /* rounded-2xl */
-  box-shadow: 0 8px 32px rgba(31, 41, 55, 0.08);
-  transition: all 200ms ease;
-}
-
-/* Reduced blur on mobile for smooth performance */
-@media (max-width: 640px) {
-  .glass {
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-}
-
-/* More Opaque Glass for Reading / Modals to maintain high contrast */
-.glass-opaque {
-  background-color: rgba(255, 255, 255, 0.78);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 1rem;
-  box-shadow: 0 16px 40px rgba(31, 41, 55, 0.12);
-}
-
-@media (max-width: 640px) {
-  .glass-opaque {
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-}
-
-/* Nested Elements inside a card (e.g., email rows, deadline items, chips) */
-.glass-nested {
-  background-color: rgba(255, 255, 255, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+/* Editorial Paper Card */
+.editorial-card {
+  background-color: #FBF8F1;
+  border: 1px solid #E2DDD1;
   border-radius: 0.75rem; /* rounded-xl */
-  transition: all 200ms ease;
+  box-shadow: 0 1px 3px rgba(26, 43, 34, 0.04);
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.glass-nested:hover {
-  background-color: rgba(255, 255, 255, 0.75);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(31, 41, 55, 0.05);
+.editorial-card:hover {
+  border-color: #D6D0C2;
 }
 
-/* Browser Fallback when backdrop-filter is unsupported */
-@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  .glass {
-    background-color: rgba(255, 255, 255, 0.92);
-  }
-  .glass-opaque {
-    background-color: rgba(255, 255, 255, 0.96);
-  }
-  .glass-nested {
-    background-color: rgba(255, 255, 255, 0.85);
-  }
+/* Subtle Row item */
+.editorial-row {
+  background-color: #FBF8F1;
+  border-bottom: 1px solid #EAE5D9;
+  transition: all 150ms ease;
 }
 
-/* Subtle scrollbars */
+.editorial-row:hover {
+  background-color: #F5EFE3;
+}
+
+/* Editorial Badges */
+.badge-urgent {
+  background-color: #FBEBEB;
+  border: 1px solid #E08A8A;
+  color: #9C2A2A;
+}
+
+.badge-soon {
+  background-color: #F9F4EB;
+  border: 1px solid #C4A265;
+  color: #8C6B2D;
+}
+
+.badge-info {
+  background-color: #F0F4EF;
+  border: 1px solid #B5BA9B;
+  color: #4E654B;
+}
+
+.badge-unconfirmed {
+  background-color: #FAF6ED;
+  border: 1px dashed #C4A265;
+  color: #8C6B2D;
+}
+
+/* Custom Editorial Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -90,10 +79,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.4);
+  background: #D3CDC0;
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.6);
+  background: #B8B0A2;
 }

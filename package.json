@@ -7,6 +7,7 @@
     "dev:server": "npm --prefix server run dev",
     "dev:client": "npm --prefix client run dev",
     "test:ai": "npm --prefix server run test:ai",
+    "test:user": "npm --prefix client run test:user",
     "install:all": "npm install && npm --prefix server install && npm --prefix client install",
     "build": "npm --prefix client run build"
   },

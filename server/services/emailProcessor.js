@@ -185,7 +185,6 @@ function validateStructuredOutput(obj) {
   if (obj.deadline !== null && typeof obj.deadline === 'string') {
     const parsed = new Date(obj.deadline);
     if (isNaN(parsed.getTime())) {
-      // Invalid date string
       obj.deadline = null;
       obj.deadline_confidence = 'uncertain';
     }
@@ -201,19 +200,11 @@ function validateStructuredOutput(obj) {
 }
 
 /**
- * Process a student email using the Gemini API (with retry, validation, rate-limit backoff, and fallback).
- *
- * @param {Object} emailData
- * @param {string} emailData.subject
- * @param {string} emailData.body
- * @param {string} emailData.sender
- * @param {string|Date} emailData.receivedAt
- * @returns {Promise<Object>} Structured classification and summary
+ * Process a student email using the Gemini API.
  */
 export async function processEmail({ subject = '', body = '', sender = '', receivedAt = new Date().toISOString() }) {
   const referenceTimestamp = new Date(receivedAt).toISOString();
 
-  // If no Gemini API key configured, use deterministic heuristic engine
   if (!aiClient) {
     return heuristicProcessor({ subject, body, sender, receivedAt: referenceTimestamp });
   }
@@ -234,7 +225,7 @@ STRICT INSTRUCTIONS:
 4. Priority Reason: A single short sentence explaining why this priority was assigned (e.g. "Marked high: assignment due in 2 days.").
 5. Deadline:
    - Output an ISO 8601 string (e.g. "2026-11-14T17:00:00Z") or null if no deadline.
-   - If there are multiple dates (e.g. an info session vs final application deadline), pick the FINAL ACTION DEADLINE that the student must meet.
+   - If there are multiple dates, pick the FINAL ACTION DEADLINE that the student must meet.
 6. Deadline Confidence:
    - CRITICAL RULE: Never present an uncertain date as confirmed.
    - Set to "uncertain" if the date is vague (e.g. "sometime late next month"), tentative ("tentatively scheduled"), missing specific details, or if dates conflict.
@@ -250,11 +241,9 @@ STRICT INSTRUCTIONS:
 Email Body:
 ${body}`;
 
-  // Call Gemini with retry logic
   let lastError = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      // 15 second timeout controller
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Gemini API call timed out after 15s')), 15000)
       );
@@ -269,21 +258,12 @@ ${body}`;
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              category: {
-                type: Type.STRING,
-                enum: VALID_CATEGORIES,
-              },
+              category: { type: Type.STRING, enum: VALID_CATEGORIES },
               summary: { type: Type.STRING },
-              priority: {
-                type: Type.STRING,
-                enum: VALID_PRIORITIES,
-              },
+              priority: { type: Type.STRING, enum: VALID_PRIORITIES },
               priority_reason: { type: Type.STRING },
               deadline: { type: Type.STRING, nullable: true },
-              deadline_confidence: {
-                type: Type.STRING,
-                enum: VALID_CONFIDENCES,
-              },
+              deadline_confidence: { type: Type.STRING, enum: VALID_CONFIDENCES },
               required_action: { type: Type.STRING, nullable: true },
               needs_followup: { type: Type.BOOLEAN },
             },
@@ -313,21 +293,207 @@ ${body}`;
       lastError = err;
       console.warn(`[emailProcessor] Attempt ${attempt} failed:`, err.message);
 
-      // Handle 429 rate limit backoff
       if (err.message && err.message.includes('429')) {
-        console.log('[emailProcessor] Rate limit hit, backing off 2s...');
         await new Promise(r => setTimeout(r, 2000));
       } else if (attempt === 1) {
-        // Brief pause before single retry
         await new Promise(r => setTimeout(r, 800));
       }
     }
   }
 
-  // Graceful fallback: Never crash the app
   console.error('[emailProcessor] All Gemini attempts failed. Using safe default.', lastError?.message);
   return createSafeFallback(body);
 }
 
-export default { processEmail };
+/**
+ * Phase 3: Synthesize Daily Academic Digest dynamically from academic emails.
+ */
+export async function generateAcademicDigest(academicEmails = []) {
+  const dateStr = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
 
+  if (!academicEmails || academicEmails.length === 0) {
+    return {
+      date: dateStr,
+      headline: 'No new academic announcements today',
+      summary: 'You have no urgent lectures, exams, or homework assignments logged for today. Your academic schedule is clear.',
+      actionItems: ['Check Canvas periodically for upcoming coursework releases.'],
+      _source: 'empty',
+    };
+  }
+
+  const emailsExcerpt = academicEmails.slice(0, 6).map((e, idx) => `
+[Email ${idx + 1}]
+From: ${e.senderName || e.sender}
+Subject: ${e.subject}
+Summary: ${e.summary || e.body.slice(0, 150)}
+Deadline: ${e.deadline || 'None'}
+Action: ${e.required_action || 'None'}
+`).join('\n');
+
+  if (!aiClient) {
+    // Intelligent heuristic synthesis
+    const highUrgency = academicEmails.filter(e => (e.priority || '').toLowerCase() === 'high');
+    const headline = highUrgency.length > 0 
+      ? `${academicEmails.length} academic updates — ${highUrgency[0].subject.slice(0, 50)} requires attention`
+      : `${academicEmails.length} academic updates today across your courses`;
+
+    const actionItems = academicEmails
+      .filter(e => e.required_action)
+      .map(e => e.required_action)
+      .slice(0, 4);
+
+    if (actionItems.length === 0) {
+      actionItems.push('Review posted lecture slides and homework notes on the student portal.');
+    }
+
+    return {
+      date: dateStr,
+      headline,
+      summary: `You have ${academicEmails.length} course-related updates logged. Key subjects include ${academicEmails.slice(0, 2).map(e => e.subject.slice(0, 30)).join(' and ')}.`,
+      actionItems,
+      _source: 'heuristic',
+    };
+  }
+
+  try {
+    const prompt = `You are Campus Cue's Academic Briefing AI.
+Synthesize the following student academic emails into a concise, encouraging morning digest.
+Today's Date: ${dateStr}
+
+Academic Emails:
+${emailsExcerpt}
+
+Return ONLY valid JSON matching this schema:
+{
+  "date": "${dateStr}",
+  "headline": "1 punchy headline summarizing today's key academic updates (max 12 words)",
+  "summary": "2 to 3 readable sentences explaining the most critical academic obligations, exam shifts, and office hours.",
+  "actionItems": ["Action item 1", "Action item 2", "Action item 3"]
+}`;
+
+    const response = await aiClient.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            date: { type: Type.STRING },
+            headline: { type: Type.STRING },
+            summary: { type: Type.STRING },
+            actionItems: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+          },
+          required: ['date', 'headline', 'summary', 'actionItems'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text.trim());
+    parsed._source = 'gemini';
+    return parsed;
+  } catch (err) {
+    console.warn('⚠️ Dynamic digest synthesis failed, using fallback:', err.message);
+    return {
+      date: dateStr,
+      headline: `${academicEmails.length} academic updates logged for today`,
+      summary: 'Stay mindful of upcoming project milestones and lecture notices posted this week.',
+      actionItems: academicEmails.filter(e => e.required_action).map(e => e.required_action).slice(0, 3),
+      _source: 'fallback',
+    };
+  }
+}
+
+/**
+ * Phase 3: Smart AI Reply Drafter for university correspondence.
+ */
+export async function generateReplyDraft({ subject = '', body = '', sender = '', action = '', intent = 'polite_confirm', studentNotes = '', studentName = '' }) {
+  const intentPrompts = {
+    polite_confirm: 'Acknowledge receipt and politely confirm attendance / slot / action as requested.',
+    request_extension: 'Politely request a brief deadline extension with a reasonable, respectful academic justification.',
+    ask_question: 'Ask a thoughtful, concise clarifying question about the submission guidelines or meeting agenda.',
+    polite_decline: 'Express sincere gratitude but politely decline due to an irreconcilable scheduling conflict.',
+  };
+
+  const selectedIntent = intentPrompts[intent] || intentPrompts.polite_confirm;
+  const signoffName = studentName ? studentName.trim() : 'Student';
+
+  if (!aiClient) {
+    // Intelligent heuristic template fallback
+    const senderName = sender.split('<')[0].trim() || 'Professor';
+    let draftBody = '';
+    
+    if (intent === 'request_extension') {
+      draftBody = `Dear ${senderName},\n\nThank you for the update regarding "${subject}".\n\nI am writing to respectfully ask if it might be possible to grant a brief extension on this submission. Due to an overlapping course milestone this week, the additional time would allow me to ensure the work meets the highest quality standards.\n\nThank you very much for your time and understanding.\n\nSincerely,\n${signoffName}`;
+    } else if (intent === 'ask_question') {
+      draftBody = `Dear ${senderName},\n\nThank you for reaching out regarding "${subject}".\n\nCould you please clarify the specific format requirements for this deliverable? I want to make sure our team adheres to your guidelines.\n\nThank you for your guidance,\n${signoffName}`;
+    } else if (intent === 'polite_decline') {
+      draftBody = `Dear ${senderName},\n\nThank you very much for this opportunity regarding "${subject}".\n\nUnfortunately, due to a prior academic commitment scheduled at the same time, I will be unable to participate on this occasion. I hope to stay engaged with future opportunities.\n\nBest regards,\n${signoffName}`;
+    } else {
+      draftBody = `Dear ${senderName},\n\nThank you for the notification regarding "${subject}".\n\nI am writing to confirm that I have noted the details and have completed the requested action (${action || 'as outlined in your email'}).\n\nPlease let me know if any further information is required.\n\nBest regards,\n${signoffName}`;
+    }
+
+    return {
+      draftSubject: `Re: ${subject.replace(/^Re:\s*/i, '')}`,
+      draftBody,
+      _source: 'heuristic',
+    };
+  }
+
+  try {
+    const prompt = `You are Campus Cue's Student Email Writing Assistant.
+Compose a polite, professional, and well-structured email response from a university student.
+
+ORIGINAL EMAIL:
+- From: ${sender}
+- Subject: ${subject}
+- Body: ${body.slice(0, 600)}
+- Action Needed: ${action || 'General response'}
+
+STUDENT INTENT: ${selectedIntent}
+ADDITIONAL STUDENT INSTRUCTIONS: ${studentNotes || 'Keep it professional and concise.'}
+
+Return ONLY valid JSON matching:
+{
+  "draftSubject": "Re: ...",
+  "draftBody": "Full email text with professional greeting, concise body, and student signoff"
+}`;
+
+    const response = await aiClient.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            draftSubject: { type: Type.STRING },
+            draftBody: { type: Type.STRING },
+          },
+          required: ['draftSubject', 'draftBody'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text.trim());
+    parsed._source = 'gemini';
+    return parsed;
+  } catch (err) {
+    console.warn('⚠️ Reply draft generation error:', err.message);
+    return {
+      draftSubject: `Re: ${subject.replace(/^Re:\s*/i, '')}`,
+      draftBody: `Dear ${sender.split('<')[0].trim() || 'Sir/Madam'},\n\nThank you for your email. I am confirming receipt and following up as requested.\n\nBest regards,\nStudent`,
+      _source: 'fallback',
+    };
+  }
+}
+
+export default { processEmail, generateAcademicDigest, generateReplyDraft };
