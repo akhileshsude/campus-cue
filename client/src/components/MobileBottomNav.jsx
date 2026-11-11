@@ -1,9 +1,10 @@
 import React from 'react';
-import { Home, Inbox, Calendar, CheckSquare } from 'lucide-react';
+import { Home, Inbox, Calendar, CheckSquare, BookOpen } from 'lucide-react';
 
 export default function MobileBottomNav({ currentView, setCurrentView, unreadCount = 0 }) {
   const tabs = [
     { id: 'home', label: 'Home', icon: Home },
+    { id: 'digest', label: 'Digest', icon: BookOpen },
     { id: 'inbox', label: 'Inbox', icon: Inbox, count: unreadCount },
     { id: 'deadlines', label: 'Deadlines', icon: Calendar },
     { id: 'actions', label: 'Actions', icon: CheckSquare },

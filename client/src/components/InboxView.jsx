@@ -7,7 +7,9 @@ import {
   CheckCircle2, 
   ChevronDown,
   Sparkles,
-  Inbox as InboxIcon
+  Inbox as InboxIcon,
+  PlusCircle,
+  RefreshCw
 } from 'lucide-react';
 
 const CATEGORIES = ['All', 'Academics', 'Placements', 'Clubs', 'Events', 'Announcements'];
@@ -16,14 +18,16 @@ export default function InboxView({
   emails = [], 
   onSelectEmail, 
   onToggleRead, 
-  onUpdateCategory 
+  onUpdateCategory,
+  onOpenIngest,
+  isProcessing = false,
 }) {
   const [activeCategory, setActiveCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Filter emails based on category and search
   const filteredEmails = emails.filter((email) => {
-    const effectiveCategory = email.user_category || email.category;
+    const effectiveCategory = email.user_category || email.category || 'Announcements';
     if (activeCategory !== 'All' && effectiveCategory.toLowerCase() !== activeCategory.toLowerCase()) {
       return false;
     }
@@ -53,10 +57,10 @@ export default function InboxView({
   };
 
   const getRowBadge = (email) => {
-    const priority = (email.priority || '').toLowerCase();
-    const effectiveCat = email.user_category || email.category;
+    const effectivePriority = (email.user_priority || email.priority || 'medium').toLowerCase();
+    const effectiveCat = email.user_category || email.category || 'Announcements';
 
-    if (priority === 'high') {
+    if (effectivePriority === 'high') {
       return { label: 'Urgent', class: 'badge-urgent' };
     }
     if (effectiveCat === 'Academics') {
@@ -79,9 +83,14 @@ export default function InboxView({
       
       {/* Header with Title & Search Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <h1 className="font-serif text-3xl sm:text-4xl font-bold tracking-tight text-ink">
-          Inbox
-        </h1>
+        <div>
+          <h1 className="font-serif text-3xl sm:text-4xl font-bold tracking-tight text-ink">
+            Inbox
+          </h1>
+          <p className="text-xs text-ink-muted mt-0.5">
+            Classified correspondence, actions & academic updates
+          </p>
+        </div>
 
         <div className="flex items-center gap-3 w-full sm:w-auto">
           <div className="relative flex-1 sm:w-64">
@@ -95,14 +104,28 @@ export default function InboxView({
             />
           </div>
 
-          <button 
-            title="Filter preferences"
-            className="p-2 rounded-xl border border-cream-border bg-cream-card hover:bg-cream transition-colors text-ink-muted shrink-0"
-          >
-            <Filter className="w-4 h-4" />
-          </button>
+          {onOpenIngest && (
+            <button
+              onClick={onOpenIngest}
+              className="px-3.5 py-1.5 bg-forest hover:bg-forest-hover text-[#F1EBDD] text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors shadow-2xs shrink-0"
+              title="Add or ingest new emails"
+            >
+              <PlusCircle className="w-3.5 h-3.5 text-gold" />
+              <span>Add Email</span>
+            </button>
+          )}
         </div>
       </div>
+
+      {/* AI Processing Banner */}
+      {isProcessing && (
+        <div className="p-3 bg-forest/10 border border-forest/20 rounded-xl flex items-center gap-3 animate-pulse">
+          <RefreshCw className="w-4 h-4 text-forest animate-spin shrink-0" />
+          <div className="text-xs text-forest">
+            <span className="font-bold">Processing with AI...</span> Analyzing collegiate emails in batches, extracting deadlines & generating structured summaries.
+          </div>
+        </div>
+      )}
 
       {/* Category Tabs Bar */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none border-b border-cream-border">
@@ -127,15 +150,33 @@ export default function InboxView({
       {/* Email List Feed Table */}
       <div className="editorial-card divide-y divide-cream-border overflow-hidden">
         {filteredEmails.length === 0 ? (
-          <div className="p-12 text-center text-ink-muted space-y-2">
-            <InboxIcon className="w-8 h-8 mx-auto text-ink-muted/50" />
-            <p className="text-sm font-semibold text-ink">No emails found</p>
-            <p className="text-xs">Try selecting another category or clearing your search query.</p>
+          <div className="p-12 text-center text-ink-muted space-y-3">
+            <InboxIcon className="w-10 h-10 mx-auto text-ink-muted/40" />
+            <div>
+              <p className="text-sm font-bold text-ink">No emails found</p>
+              <p className="text-xs text-ink-muted mt-0.5">
+                {activeCategory !== 'All' 
+                  ? `No correspondence found in ${activeCategory}. Try another category or clear your search.`
+                  : 'Your inbox is completely clear. Ingest an .eml file, connect Gmail, or paste correspondence to get started.'}
+              </p>
+            </div>
+            {onOpenIngest && (
+              <div className="pt-2">
+                <button
+                  onClick={onOpenIngest}
+                  className="px-4 py-2 bg-forest hover:bg-forest-hover text-[#F1EBDD] text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 transition-colors shadow-xs"
+                >
+                  <PlusCircle className="w-3.5 h-3.5 text-gold" />
+                  <span>Add your first email</span>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           filteredEmails.map((email) => {
             const badge = getRowBadge(email);
             const timeText = formatRowTime(email.received_at);
+            const hasUserOverride = Boolean(email.user_category || email.user_priority || email.user_deadline || email.edited_by_user);
 
             return (
               <div
@@ -165,6 +206,11 @@ export default function InboxView({
                       <span className={`text-xs sm:text-sm truncate ${!email.is_read ? 'font-bold text-ink' : 'font-medium text-ink'}`}>
                         {email.senderName || email.sender.split('<')[0]}
                       </span>
+                      {hasUserOverride && (
+                        <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.2 rounded-full border border-sage/40 shrink-0">
+                          Edited by you
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 mt-0.5">
@@ -176,7 +222,7 @@ export default function InboxView({
                 </div>
 
                 {/* Right: Badge & Timestamp */}
-                <div className="flex items-center gap-3 shrink-0">
+                <div className="flex items-center gap-2.5 shrink-0">
                   <span className={`text-[10px] sm:text-[11px] font-bold px-2.5 py-0.5 rounded-full ${badge.class}`}>
                     {badge.label}
                   </span>
@@ -194,4 +240,3 @@ export default function InboxView({
     </div>
   );
 }
-

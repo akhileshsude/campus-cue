@@ -6,6 +6,7 @@ import {
   CheckSquare, 
   Settings, 
   Sparkles,
+  BookOpen,
   ExternalLink,
   Layers
 } from 'lucide-react';
@@ -21,6 +22,7 @@ export default function Sidebar({
   const { openSettings } = useUser();
   const navItems = [
     { id: 'home', label: 'Home', icon: Home },
+    { id: 'digest', label: 'Digest', icon: BookOpen },
     { id: 'inbox', label: 'Inbox', icon: Inbox, count: unreadCount },
     { id: 'deadlines', label: 'Deadlines', icon: Calendar, count: deadlinesCount },
     { id: 'actions', label: 'Actions', icon: CheckSquare, count: remindersCount },

@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -20,9 +21,48 @@ const VALID_PRIORITIES = ['High', 'Medium', 'Low'];
 const VALID_CONFIDENCES = ['confirmed', 'uncertain'];
 
 /**
+ * Step 11: Compute content hash (SHA-256) of sender + subject + body
+ * Used for deduplication with user_id in database.
+ */
+export function computeContentHash(sender = '', subject = '', body = '') {
+  const normSender = (sender || '').trim().toLowerCase();
+  const normSubject = (subject || '').trim().toLowerCase();
+  const normBody = (body || '').replace(/\s+/g, ' ').trim();
+  return crypto.createHash('sha256').update(`${normSender}|${normSubject}|${normBody}`).digest('hex');
+}
+
+/**
+ * Step 13: Strict Date Validation & Safeguards
+ * Rejects malformed dates, dates more than a year away, or invalid years.
+ */
+export function validateAndSanitizeDate(dateStr, referenceDate = new Date()) {
+  if (!dateStr || typeof dateStr !== 'string') {
+    return { validDate: null, confidence: 'uncertain' };
+  }
+
+  const parsed = new Date(dateStr);
+  const time = parsed.getTime();
+
+  if (isNaN(time)) {
+    return { validDate: null, confidence: 'uncertain' };
+  }
+
+  const refTime = referenceDate.getTime();
+  const diffDays = (time - refTime) / (1000 * 60 * 60 * 24);
+  const year = parsed.getFullYear();
+
+  // Reject dates more than 365 days away or ridiculous years
+  if (diffDays > 365 || diffDays < -180 || year < 2024 || year > 2030) {
+    return { validDate: null, confidence: 'uncertain' };
+  }
+
+  return { validDate: parsed.toISOString(), confidence: 'confirmed' };
+}
+
+/**
  * Fallback response object when AI fails or input is malformed.
  */
-function createSafeFallback(body = '') {
+function createSafeFallback(body = '', errorMessage = null) {
   const sentences = (body || '')
     .replace(/\n+/g, ' ')
     .split(/(?<=[.?!])\s+/)
@@ -39,112 +79,160 @@ function createSafeFallback(body = '') {
     deadline_confidence: 'uncertain',
     required_action: null,
     needs_followup: false,
+    needs_reply: false,
+    needs_action: false,
+    reminder_note: null,
+    status: errorMessage ? 'failed' : 'processed',
+    error: errorMessage,
     _source: 'fallback',
   };
 }
 
 /**
  * Smart heuristic processor used when GEMINI_API_KEY is not set or offline.
- * Enables full end-to-end testing and development without requiring an API key.
+ * Highly tuned for Indian university contexts and edge cases.
  */
-function heuristicProcessor({ subject = '', body = '', sender = '', receivedAt }) {
+export function heuristicProcessor({ subject = '', body = '', sender = '', receivedAt }) {
   const refDate = receivedAt ? new Date(receivedAt) : new Date();
   const text = `${subject} ${body}`.toLowerCase();
 
-  // 1. Category Detection
+  // 1. Category Detection (Indian College Context)
   let category = 'Announcements';
-  if (/(exam|quiz|assignment|homework|professor|prof\.|syllabus|lecture|lab viva|cs301|math204|grading|office hours|research assistant)/i.test(text)) {
-    category = 'Academics';
-  } else if (/(placement|shortlist|internship|interview|hiring|recruitment|coding test|assessment|deloitte|google swe)/i.test(text)) {
+
+  // Check Placements first (before Academics or Clubs, so "B.Tech students placement drive" goes to Placements)
+  // Note: Use word boundary \bplacement(s)?\b so "page replacement" does not falsely match!
+  if (/(\bplacements?\b|t&p\b|placement cell|campus drive|recruitment|sde role|ctc\b|lpa\b|hiring|shortlist|internship|summer research fellowship)/i.test(text)) {
     category = 'Placements';
-  } else if (/(hackathon|hackbattle|robotics|rover|photography|pixel club|audition|society meeting)/i.test(text)) {
-    category = 'Clubs';
-  } else if (/(keynote|symposium|fest|distinguished lecture|rsvp|annual conference|auditorium)/i.test(text)) {
+  } else if (/(hackathon|keynote|symposium|distinguished lecture|annual day|sports fest|webinar|seminar|auditorium|guest talk|conference)/i.test(text)) {
     category = 'Events';
+  } else if (/(robotics society|cultural fest|music club|audition|society meeting|photography club|pixel club|dramatics|e-cell|student council)/i.test(text)) {
+    category = 'Clubs';
+  } else if (/(assignment|homework|lab assignment|exam|midterm|end-semester|theory timetable|controller of examinations|lab viva|prof\.|professor|internal marks|attendance|curriculum|moodle|syllabus)/i.test(text)) {
+    category = 'Academics';
+  } else if (/(mess|hostel|warden|maintenance|library book|stock verification|holiday|fees|transport|bus schedule|circular)/i.test(text)) {
+    category = 'Announcements';
   }
 
   // 2. Priority & Reason
   let priority = 'Medium';
   let priority_reason = 'Standard campus correspondence.';
-  
-  if (/(urgent|mandatory|exam|shortlist|disqualification|penalty|due tomorrow|overdue|closing soon)/i.test(text)) {
+
+  if (/(urgent|mandatory|exam|assignment.*due|due date|deduction|penalty|disqualification|registration closes strictly|cutoff|last date to register|immediate action|due tomorrow|overdue)/i.test(text)) {
     priority = 'High';
-    if (/shortlist|interview|coding test/i.test(text)) {
-      priority_reason = 'Marked high: time-sensitive placement assessment or interview requirement.';
-    } else if (/exam|midterm|final exam/i.test(text)) {
-      priority_reason = 'Marked high: mandatory academic examination schedule or policy.';
-    } else if (/overdue|penalty|due/i.test(text)) {
-      priority_reason = 'Marked high: upcoming submission deadline with potential penalties.';
+    if (/shortlist|interview|coding test|placement|registration deadline/i.test(text)) {
+      priority_reason = 'Marked high: time-sensitive placement registration or interview assessment requirement.';
+    } else if (/exam|midterm|final exam|theory timetable/i.test(text)) {
+      priority_reason = 'Marked high: mandatory academic examination timetable or room schedule.';
+    } else if (/overdue|penalty|deduction|assignment|due date/i.test(text)) {
+      priority_reason = 'Marked high: upcoming submission deadline with academic penalties.';
     } else {
       priority_reason = 'Marked high: urgent university requirement.';
     }
-  } else if (/(newsletter|photo of the week|routine|intermittent|courtesy notice|solutions posted)/i.test(text)) {
+  } else if (/(newsletter|photo of the week|routine|intermittent|courtesy notice|optional meetup|general circular|mess timings|hostel residents)/i.test(text)) {
     priority = 'Low';
-    priority_reason = 'Marked low: non-urgent routine update or informational newsletter.';
+    if (/mess|hostel|library/i.test(text)) {
+      priority_reason = 'Marked low: routine campus administrative circular with no urgent deadline.';
+    } else {
+      priority_reason = 'Marked low: non-urgent routine update or student newsletter.';
+    }
   } else {
     priority = 'Medium';
     priority_reason = 'Marked medium: relevant campus activity with moderate timeline.';
   }
 
-  // 3. Deadline & Confidence
+  // 3. Deadline & Confidence (Resolves tricky cases: vague dates, relative dates, two dates)
   let deadline = null;
   let deadline_confidence = 'confirmed';
 
-  if (/sometime\s+(late|next|towards)|tentative|tentatively|pending\s+venue|to\s+be\s+announced/i.test(text)) {
+  // Tricky Case A: Vague deadline ("early next week", "sometime soon", "tentatively")
+  if (/early\s+next\s+week|sometime\s+(late|next|soon)|tentative|tentatively|pending\s+venue|to\s+be\s+announced|tba/i.test(text)) {
     deadline_confidence = 'uncertain';
-    if (/next month/i.test(text)) {
-      const tentative = new Date(refDate);
-      tentative.setDate(tentative.getDate() + 30);
-      deadline = tentative.toISOString();
-    } else if (/next (tuesday|wednesday|thursday|friday)/i.test(text)) {
-      const tentative = new Date(refDate);
-      tentative.setDate(tentative.getDate() + 7);
-      deadline = tentative.toISOString();
-    }
-  } else if (/tomorrow\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i.test(text) || /by\s+tomorrow/i.test(text)) {
+    const tentative = new Date(refDate);
+    tentative.setDate(tentative.getDate() + 7);
+    tentative.setHours(17, 0, 0, 0);
+    deadline = tentative.toISOString();
+  }
+  // Tricky Case B: Two dates (e.g., "Workshop on Nov 22nd, but registration closes strictly on Nov 20th")
+  // Rule: the student action deadline is the registration cutoff!
+  else if (/registration\s+closes?\s+(?:strictly\s+)?(?:on|by)?\s*([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?/i.test(text)) {
+    const monthStr = RegExp.$1;
+    const dayNum = parseInt(RegExp.$2, 10);
     const d = new Date(refDate);
-    d.setDate(d.getDate() + 1);
-    d.setHours(17, 0, 0, 0); // default 5 PM
-    deadline = d.toISOString();
-    deadline_confidence = 'confirmed';
-  } else if (/this\s+friday/i.test(text)) {
-    const d = new Date(refDate);
-    const day = d.getDay();
-    const diff = (5 - day + 7) % 7 || 7;
-    d.setDate(d.getDate() + diff);
+    const monthIdx = new Date(`${monthStr} 1, 2026`).getMonth();
+    if (!isNaN(monthIdx)) d.setMonth(monthIdx);
+    d.setDate(dayNum);
     d.setHours(23, 59, 0, 0);
     deadline = d.toISOString();
     deadline_confidence = 'confirmed';
-  } else if (/in\s+(\d+)\s+days?/i.test(text)) {
-    const days = parseInt(RegExp.$1, 10);
+  }
+  // Tricky Case C: Relative date ("by this Friday", "this Friday at 5:00 PM")
+  else if (/this\s+friday/i.test(text)) {
     const d = new Date(refDate);
-    d.setDate(d.getDate() + days);
+    const currentDay = d.getDay(); // 0 is Sun, 5 is Fri
+    let diff = (5 - currentDay + 7) % 7;
+    if (diff === 0) diff = 7; // next Friday if today is Friday
+    d.setDate(d.getDate() + diff);
+    if (/5(?::00)?\s*pm/i.test(text)) {
+      d.setHours(17, 0, 0, 0);
+    } else {
+      d.setHours(23, 59, 0, 0);
+    }
     deadline = d.toISOString();
     deadline_confidence = 'confirmed';
+  }
+  // Tomorrow deadline
+  else if (/tomorrow\s+(?:at|by)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i.test(text) || /by\s+tomorrow/i.test(text)) {
+    const d = new Date(refDate);
+    d.setDate(d.getDate() + 1);
+    d.setHours(17, 0, 0, 0);
+    deadline = d.toISOString();
+    deadline_confidence = 'confirmed';
+  }
+  // Specific date pattern (e.g. "commence from November 25, 2026", "before November 18, 2026", "Nov 15th")
+  else if (/(?:before|due|deadline|by|on|commence\s+from|commencing\s+on|starts?\s+from|starts?\s+on|apply\s+before)\s+([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?/i.test(text) ||
+           /(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)(?:\s+(\d{4}))?/i.test(text)) {
+    let monthStr = RegExp.$1;
+    let dayNum = parseInt(RegExp.$2, 10);
+    let yearNum = RegExp.$3 ? parseInt(RegExp.$3, 10) : refDate.getFullYear();
+
+    if (isNaN(dayNum)) {
+      dayNum = parseInt(RegExp.$1, 10);
+      monthStr = RegExp.$2;
+    }
+
+    const testMonth = new Date(`${monthStr} 1, 2026`).getMonth();
+    if (!isNaN(testMonth)) {
+      const d = new Date(yearNum, testMonth, dayNum, 23, 59, 0, 0);
+      const sanitized = validateAndSanitizeDate(d.toISOString(), refDate);
+      deadline = sanitized.validDate;
+      deadline_confidence = sanitized.confidence;
+    }
   }
 
   // 4. Required Action & Follow-up
   let required_action = null;
   let needs_followup = false;
 
-  if (/(action required|you must|please confirm|reply with|register your slot|rsvp|submit your)/i.test(text)) {
+  if (/(action required|you must|please confirm|reply with|register before|register your slot|rsvp|submit your|apply with|apply before|have your .* ready|bring your|admit card|fill the form)/i.test(text)) {
     needs_followup = true;
     if (/slot/i.test(text)) {
       required_action = 'Select assessment slot on the placement portal.';
-    } else if (/cv|resume/i.test(text)) {
+    } else if (/cv|resume|statement of purpose/i.test(text)) {
       required_action = 'Reply with updated CV and availability.';
-    } else if (/rsvp/i.test(text)) {
-      required_action = 'Claim student pass via the events portal.';
-    } else if (/discord/i.test(text)) {
-      required_action = 'Join hackathon Discord server before deadline.';
-    } else if (/design doc|github/i.test(text)) {
-      required_action = 'Submit architecture doc and share GitHub repo with TA.';
+    } else if (/placement|apply before|register before|registration closes/i.test(text)) {
+      required_action = 'Complete registration on the T&P portal before the deadline.';
+    } else if (/assignment|github|architecture doc|source code/i.test(text)) {
+      required_action = 'Submit assignment PDF to the course portal.';
+    } else if (/timetable|exam|admit card|hall ticket|bring your/i.test(text)) {
+      required_action = 'Verify hall ticket and note room allocations.';
+    } else if (/fest|audition/i.test(text)) {
+      required_action = 'Register team for the fest.';
     } else {
-      required_action = 'Review details and complete required student action.';
+      required_action = 'Complete required student deliverable or verification.';
     }
   }
 
-  // 5. Summary (2-3 sentences)
+  // 5. Summary (2-3 sentences max)
   const sentences = body
     .replace(/\n+/g, ' ')
     .split(/(?<=[.?!])\s+/)
@@ -154,7 +242,35 @@ function heuristicProcessor({ subject = '', body = '', sender = '', receivedAt }
 
   const summary = sentences.length > 50 
     ? sentences 
-    : `${subject}. Sent by ${sender}. Please review the instructions carefully.`;
+    : `${subject}. Sent by ${sender}. Please review instructions carefully.`;
+
+  // 6. Step 9 Reminders: needs_reply, needs_action, reminder_note
+  const replySignals = /reply|respond|confirm|rsvp|select slot|choice|let me know|send.*cv|interview slot/i.test(text);
+  const actionSignals = /submit|upload|due|pay|register|timetable|exam|bring|room|attendance|deadline/i.test(text);
+
+  let needs_reply = false;
+  let needs_action = false;
+  let reminder_note = null;
+
+  if (replySignals) {
+    needs_reply = true;
+    if (/slot/i.test(text)) {
+      reminder_note = 'Confirm your preferred interview/assessment slot on the placement portal.';
+    } else if (/cv|resume/i.test(text)) {
+      reminder_note = 'Reply to professor with your updated CV and availability.';
+    } else if (/rsvp|attend/i.test(text)) {
+      reminder_note = 'Send RSVP / attendance confirmation.';
+    } else {
+      reminder_note = 'Reply to sender with requested information.';
+    }
+  }
+
+  if (actionSignals || required_action) {
+    needs_action = true;
+    if (!reminder_note) {
+      reminder_note = required_action || 'Complete required student deliverable or verification.';
+    }
+  }
 
   return {
     category,
@@ -164,7 +280,11 @@ function heuristicProcessor({ subject = '', body = '', sender = '', receivedAt }
     deadline,
     deadline_confidence,
     required_action,
-    needs_followup,
+    needs_followup: Boolean(needs_followup || needs_reply || needs_action),
+    needs_reply,
+    needs_action,
+    reminder_note,
+    status: 'processed',
     _source: 'heuristic',
   };
 }
@@ -172,7 +292,7 @@ function heuristicProcessor({ subject = '', body = '', sender = '', receivedAt }
 /**
  * Validate that parsed output adheres strictly to the schema.
  */
-function validateStructuredOutput(obj) {
+function validateStructuredOutput(obj, refDate) {
   if (!obj || typeof obj !== 'object') return false;
   if (!VALID_CATEGORIES.includes(obj.category)) return false;
   if (typeof obj.summary !== 'string' || obj.summary.trim().length === 0) return false;
@@ -181,67 +301,68 @@ function validateStructuredOutput(obj) {
   if (!VALID_CONFIDENCES.includes(obj.deadline_confidence)) return false;
   if (typeof obj.needs_followup !== 'boolean') return false;
 
-  // Validate deadline format if not null
-  if (obj.deadline !== null && typeof obj.deadline === 'string') {
-    const parsed = new Date(obj.deadline);
-    if (isNaN(parsed.getTime())) {
-      obj.deadline = null;
+  // Step 13: Date validation & sanitization
+  if (obj.deadline) {
+    const { validDate, confidence } = validateAndSanitizeDate(obj.deadline, refDate);
+    obj.deadline = validDate;
+    if (confidence === 'uncertain') {
       obj.deadline_confidence = 'uncertain';
     }
   } else {
     obj.deadline = null;
+    obj.deadline_confidence = 'confirmed';
   }
 
   if (obj.required_action !== null && typeof obj.required_action !== 'string') {
     obj.required_action = null;
   }
 
+  obj.needs_reply = Boolean(obj.needs_reply);
+  obj.needs_action = Boolean(obj.needs_action);
+  if (obj.reminder_note && typeof obj.reminder_note !== 'string') {
+    obj.reminder_note = null;
+  }
+
   return true;
 }
 
 /**
- * Process a student email using the Gemini API.
+ * Process a student email using the Gemini API with retry, rate-limit backoff, and safe zero-crash fallback.
  */
 export async function processEmail({ subject = '', body = '', sender = '', receivedAt = new Date().toISOString() }) {
   const referenceTimestamp = new Date(receivedAt).toISOString();
+  const refDate = new Date(referenceTimestamp);
 
   if (!aiClient) {
     return heuristicProcessor({ subject, body, sender, receivedAt: referenceTimestamp });
   }
 
   const systemPrompt = `You are Campus Cue's AI Email Analyst for university students.
-Analyze the following student email and return ONLY a valid JSON object matching the requested schema.
+Analyze the student email and return ONLY a valid JSON object matching the requested schema.
 
 REFERENCE TIMESTAMP: ${referenceTimestamp}
-All relative dates like "today", "tomorrow", "this Friday", "next week", "in 2 days" MUST be calculated relative to this reference timestamp.
+CRITICAL RULES:
+1. Relative dates (e.g. "today", "tomorrow", "this Friday", "by next Monday") MUST be resolved strictly relative to this reference timestamp.
+2. Vague or tentative dates (e.g. "early next week", "sometime soon", "tentatively planned", "pending venue approval"): MUST set deadline_confidence: "uncertain".
+3. Multiple dates in one email (e.g., event date vs registration cutoff): The deadline must be the student action deadline (when registration closes), NOT the event date!
+4. Reject dates more than 365 days away or with invalid years.
+5. High Priority: urgent academic schedules (exams, room shifts, submissions, attendance warnings) and valuable time-sensitive opportunities (placement drives, interview shortlists, internships).
+6. Low Priority: routine newsletters, club social digests, general mess/hostel maintenance circulars.
+7. Category must be exactly one of: "Academics", "Placements", "Clubs", "Events", "Announcements".
+8. required_action: concise sentence of what the student must do, or null.
+9. needs_reply: true if the email asks student to reply, confirm attendance, or pick a slot.
+10. needs_action: true if student must submit, register, attend, or complete a task.
+11. reminder_note: short sentence describing what to reply to or complete.`;
 
-STRICT INSTRUCTIONS:
-1. Category: Must be exactly one of: "Academics", "Placements", "Clubs", "Events", "Announcements".
-2. Summary: Write a concise 2 to 3 sentence summary focusing on student obligations, deadlines, and key updates.
-3. Priority:
-   - "High": Urgent academic announcements (exams, room shifts, attendance warnings, imminent assignment deadlines) or high-stakes career opportunities (placement tests, interview slot booking, competitive internships) with near deadlines.
-   - "Medium": Standard assignments with moderate timeline, team meetings, general events requiring RSVP.
-   - "Low": Routine club newsletters, general notices, or non-urgent facilities announcements.
-4. Priority Reason: A single short sentence explaining why this priority was assigned (e.g. "Marked high: assignment due in 2 days.").
-5. Deadline:
-   - Output an ISO 8601 string (e.g. "2026-11-14T17:00:00Z") or null if no deadline.
-   - If there are multiple dates, pick the FINAL ACTION DEADLINE that the student must meet.
-6. Deadline Confidence:
-   - CRITICAL RULE: Never present an uncertain date as confirmed.
-   - Set to "uncertain" if the date is vague (e.g. "sometime late next month"), tentative ("tentatively scheduled"), missing specific details, or if dates conflict.
-   - Set to "confirmed" only when the date and time are clearly established.
-7. Required Action: A concise description of what the student must do (e.g. "Select coding assessment slot on portal"), or null if no student action is required.
-8. Needs Follow-up: true if student reply/submission is needed; false otherwise.`;
-
-  const userPrompt = `Email Metadata:
-- Sender: ${sender}
-- Received At: ${referenceTimestamp}
-- Subject: ${subject}
+  const userPrompt = `Sender: ${sender}
+Subject: ${subject}
+Received At: ${referenceTimestamp}
 
 Email Body:
 ${body}`;
 
   let lastError = null;
+
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const timeoutPromise = new Promise((_, reject) =>
@@ -266,6 +387,9 @@ ${body}`;
               deadline_confidence: { type: Type.STRING, enum: VALID_CONFIDENCES },
               required_action: { type: Type.STRING, nullable: true },
               needs_followup: { type: Type.BOOLEAN },
+              needs_reply: { type: Type.BOOLEAN },
+              needs_action: { type: Type.BOOLEAN },
+              reminder_note: { type: Type.STRING, nullable: true },
             },
             required: [
               'category',
@@ -274,6 +398,8 @@ ${body}`;
               'priority_reason',
               'deadline_confidence',
               'needs_followup',
+              'needs_reply',
+              'needs_action',
             ],
           },
         },
@@ -283,8 +409,9 @@ ${body}`;
       const rawText = response.text ? response.text.trim() : '';
 
       const parsed = JSON.parse(rawText);
-      if (validateStructuredOutput(parsed)) {
+      if (validateStructuredOutput(parsed, refDate)) {
         parsed._source = 'gemini';
+        parsed.status = 'processed';
         return parsed;
       } else {
         throw new Error('Gemini output failed schema validation');
@@ -301,119 +428,12 @@ ${body}`;
     }
   }
 
-  console.error('[emailProcessor] All Gemini attempts failed. Using safe default.', lastError?.message);
-  return createSafeFallback(body);
+  console.error('[emailProcessor] All Gemini attempts failed. Using safe zero-crash fallback.', lastError?.message);
+  return createSafeFallback(body, lastError?.message);
 }
 
 /**
- * Phase 3: Synthesize Daily Academic Digest dynamically from academic emails.
- */
-export async function generateAcademicDigest(academicEmails = []) {
-  const dateStr = new Date().toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric'
-  });
-
-  if (!academicEmails || academicEmails.length === 0) {
-    return {
-      date: dateStr,
-      headline: 'No new academic announcements today',
-      summary: 'You have no urgent lectures, exams, or homework assignments logged for today. Your academic schedule is clear.',
-      actionItems: ['Check Canvas periodically for upcoming coursework releases.'],
-      _source: 'empty',
-    };
-  }
-
-  const emailsExcerpt = academicEmails.slice(0, 6).map((e, idx) => `
-[Email ${idx + 1}]
-From: ${e.senderName || e.sender}
-Subject: ${e.subject}
-Summary: ${e.summary || e.body.slice(0, 150)}
-Deadline: ${e.deadline || 'None'}
-Action: ${e.required_action || 'None'}
-`).join('\n');
-
-  if (!aiClient) {
-    // Intelligent heuristic synthesis
-    const highUrgency = academicEmails.filter(e => (e.priority || '').toLowerCase() === 'high');
-    const headline = highUrgency.length > 0 
-      ? `${academicEmails.length} academic updates — ${highUrgency[0].subject.slice(0, 50)} requires attention`
-      : `${academicEmails.length} academic updates today across your courses`;
-
-    const actionItems = academicEmails
-      .filter(e => e.required_action)
-      .map(e => e.required_action)
-      .slice(0, 4);
-
-    if (actionItems.length === 0) {
-      actionItems.push('Review posted lecture slides and homework notes on the student portal.');
-    }
-
-    return {
-      date: dateStr,
-      headline,
-      summary: `You have ${academicEmails.length} course-related updates logged. Key subjects include ${academicEmails.slice(0, 2).map(e => e.subject.slice(0, 30)).join(' and ')}.`,
-      actionItems,
-      _source: 'heuristic',
-    };
-  }
-
-  try {
-    const prompt = `You are Campus Cue's Academic Briefing AI.
-Synthesize the following student academic emails into a concise, encouraging morning digest.
-Today's Date: ${dateStr}
-
-Academic Emails:
-${emailsExcerpt}
-
-Return ONLY valid JSON matching this schema:
-{
-  "date": "${dateStr}",
-  "headline": "1 punchy headline summarizing today's key academic updates (max 12 words)",
-  "summary": "2 to 3 readable sentences explaining the most critical academic obligations, exam shifts, and office hours.",
-  "actionItems": ["Action item 1", "Action item 2", "Action item 3"]
-}`;
-
-    const response = await aiClient.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            date: { type: Type.STRING },
-            headline: { type: Type.STRING },
-            summary: { type: Type.STRING },
-            actionItems: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-          },
-          required: ['date', 'headline', 'summary', 'actionItems'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text.trim());
-    parsed._source = 'gemini';
-    return parsed;
-  } catch (err) {
-    console.warn('⚠️ Dynamic digest synthesis failed, using fallback:', err.message);
-    return {
-      date: dateStr,
-      headline: `${academicEmails.length} academic updates logged for today`,
-      summary: 'Stay mindful of upcoming project milestones and lecture notices posted this week.',
-      actionItems: academicEmails.filter(e => e.required_action).map(e => e.required_action).slice(0, 3),
-      _source: 'fallback',
-    };
-  }
-}
-
-/**
- * Phase 3: Smart AI Reply Drafter for university correspondence.
+ * Smart AI Reply Drafter
  */
 export async function generateReplyDraft({ subject = '', body = '', sender = '', action = '', intent = 'polite_confirm', studentNotes = '', studentName = '' }) {
   const intentPrompts = {
@@ -427,7 +447,6 @@ export async function generateReplyDraft({ subject = '', body = '', sender = '',
   const signoffName = studentName ? studentName.trim() : 'Student';
 
   if (!aiClient) {
-    // Intelligent heuristic template fallback
     const senderName = sender.split('<')[0].trim() || 'Professor';
     let draftBody = '';
     
@@ -448,26 +467,24 @@ export async function generateReplyDraft({ subject = '', body = '', sender = '',
     };
   }
 
+  const prompt = `You are Campus Cue's Smart AI Reply Assistant for university students.
+Generate a concise, professional, student-to-faculty/corporate email reply.
+
+Original Email Subject: ${subject}
+Original Sender: ${sender}
+Original Email Body:
+${body}
+
+Student's Intent: ${selectedIntent}
+Student's Personal Notes / Context: ${studentNotes || 'None'}
+Student's Name: ${signoffName}
+
+Generate a JSON object with:
+- draftSubject: string (starting with Re:)
+- draftBody: string (cleanly formatted with salutation, 2-3 body paragraphs, and student sign-off)`;
+
   try {
-    const prompt = `You are Campus Cue's Student Email Writing Assistant.
-Compose a polite, professional, and well-structured email response from a university student.
-
-ORIGINAL EMAIL:
-- From: ${sender}
-- Subject: ${subject}
-- Body: ${body.slice(0, 600)}
-- Action Needed: ${action || 'General response'}
-
-STUDENT INTENT: ${selectedIntent}
-ADDITIONAL STUDENT INSTRUCTIONS: ${studentNotes || 'Keep it professional and concise.'}
-
-Return ONLY valid JSON matching:
-{
-  "draftSubject": "Re: ...",
-  "draftBody": "Full email text with professional greeting, concise body, and student signoff"
-}`;
-
-    const response = await aiClient.models.generateContent({
+    const res = await aiClient.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
@@ -483,17 +500,18 @@ Return ONLY valid JSON matching:
       },
     });
 
-    const parsed = JSON.parse(response.text.trim());
+    const parsed = JSON.parse(res.text.trim());
     parsed._source = 'gemini';
     return parsed;
   } catch (err) {
-    console.warn('⚠️ Reply draft generation error:', err.message);
+    console.warn('[emailProcessor] Gemini reply generation failed, using heuristic fallback:', err.message);
+    const senderName = sender.split('<')[0].trim() || 'Professor';
     return {
       draftSubject: `Re: ${subject.replace(/^Re:\s*/i, '')}`,
-      draftBody: `Dear ${sender.split('<')[0].trim() || 'Sir/Madam'},\n\nThank you for your email. I am confirming receipt and following up as requested.\n\nBest regards,\nStudent`,
+      draftBody: `Dear ${senderName},\n\nThank you for your email regarding "${subject}".\n\nI have received your note and will proceed as requested.\n\nSincerely,\n${signoffName}`,
       _source: 'fallback',
     };
   }
 }
 
-export default { processEmail, generateAcademicDigest, generateReplyDraft };
+export default { processEmail, computeContentHash, validateAndSanitizeDate, generateReplyDraft, heuristicProcessor };

@@ -7,13 +7,19 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:ai": "node scripts/testProcessor.js"
+    "test:ai": "node scripts/testProcessor.js",
+    "test:digest": "node scripts/testDigest.js",
+    "test:eml": "node scripts/testEmlParser.js",
+    "test:college": "node tests/runCollegeTests.js"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",
     "@supabase/supabase-js": "^2.49.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "googleapis": "^189.0.0",
+    "mailparser": "^3.14.3",
+    "multer": "^2.5.0"
   }
 }

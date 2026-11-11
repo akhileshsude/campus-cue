@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Clock, Calendar, AlertTriangle, ArrowRight, CheckCircle2 } from 'lucide-react';
+import { Clock, Calendar, AlertTriangle, ArrowRight, CheckCircle2, Download } from 'lucide-react';
 
 export default function DeadlinesView({ emails = [], onSelectEmail }) {
   const [activeTab, setActiveTab] = useState('upcoming'); // 'upcoming' | 'overdue' | 'completed'
@@ -8,16 +8,17 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
     const now = new Date();
 
     return emails
-      .filter((e) => Boolean(e.deadline))
+      .filter((e) => Boolean(e.user_deadline || e.deadline))
       .map((item) => {
-        const deadlineDate = new Date(item.deadline);
+        const effectiveDeadline = item.user_deadline || item.deadline;
+        const deadlineDate = new Date(effectiveDeadline);
         const diffDays = Math.ceil((deadlineDate - now) / (1000 * 60 * 60 * 24));
         const isOverdue = diffDays < 0;
 
         let statusText = 'Info';
         let statusClass = 'badge-info';
 
-        if (item.deadline_confidence === 'uncertain') {
+        if (item.deadline_confidence === 'uncertain' && !item.user_deadline) {
           statusText = 'Unconfirmed · Verify';
           statusClass = 'badge-unconfirmed';
         } else if (isOverdue) {
@@ -33,37 +34,132 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
 
         return {
           ...item,
+          effectiveDeadline,
           diffDays,
           isOverdue,
           statusText,
           statusClass,
+          isUserCorrected: Boolean(item.user_deadline),
           shortDate: {
             day: deadlineDate.getDate().toString().padStart(2, '0'),
             month: deadlineDate.toLocaleString('en-US', { month: 'short' }),
           },
         };
       })
-      .sort((a, b) => new Date(a.deadline) - new Date(b.deadline));
+      .sort((a, b) => new Date(a.effectiveDeadline) - new Date(b.effectiveDeadline));
   }, [emails]);
 
   // Filter deadlines by tab
   const filteredDeadlines = deadlines.filter((d) => {
     if (activeTab === 'overdue') return d.isOverdue;
-    if (activeTab === 'completed') return false; // sample
+    if (activeTab === 'completed') return false;
     return !d.isOverdue;
   });
+
+  // RFC 5545 iCalendar Export (.ics file generation)
+  const handleExportICS = () => {
+    const pad = (n) => (n < 10 ? '0' + n : n);
+    const formatICSDate = (date) => {
+      const d = new Date(date);
+      return (
+        d.getUTCFullYear() +
+        pad(d.getUTCMonth() + 1) +
+        pad(d.getUTCDate()) +
+        'T' +
+        pad(d.getUTCHours()) +
+        pad(d.getUTCMinutes()) +
+        pad(d.getUTCSeconds()) +
+        'Z'
+      );
+    };
+
+    const escapeICS = (str) =>
+      (str || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/;/g, '\\;')
+        .replace(/,/g, '\\,')
+        .replace(/\n/g, '\\n');
+
+    const confirmedItems = deadlines.filter(
+      (d) => d.effectiveDeadline && (d.deadline_confidence !== 'uncertain' || d.isUserCorrected)
+    );
+
+    if (confirmedItems.length === 0) {
+      alert('No confirmed deadlines to export.');
+      return;
+    }
+
+    const events = confirmedItems.map((d) => {
+      const start = new Date(d.effectiveDeadline);
+      const end = new Date(start.getTime() + 60 * 60 * 1000); // 1 hr block
+      const now = new Date();
+      const uid = `cue-${d.id || Math.random().toString(36).slice(2)}@campus-cue`;
+
+      return [
+        'BEGIN:VEVENT',
+        `UID:${uid}`,
+        `DTSTAMP:${formatICSDate(now)}`,
+        `DTSTART:${formatICSDate(start)}`,
+        `DTEND:${formatICSDate(end)}`,
+        `SUMMARY:${escapeICS(d.deadline_label || d.subject)}`,
+        `DESCRIPTION:${escapeICS((d.summary || '') + '\n\nAction: ' + (d.required_action || 'Review deliverable'))}`,
+        `CATEGORIES:${escapeICS(d.user_category || d.category || 'Collegiate')}`,
+        'STATUS:CONFIRMED',
+        'BEGIN:VALARM',
+        'TRIGGER:-PT24H',
+        'ACTION:DISPLAY',
+        `DESCRIPTION:Reminder: ${escapeICS(d.deadline_label || d.subject)} due soon`,
+        'END:VALARM',
+        'END:VEVENT',
+      ].join('\r\n');
+    });
+
+    const icsContent = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Campus Cue//Student AI Assistant//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'X-WR-CALNAME:Campus Cue Academic Deadlines',
+      ...events,
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.setAttribute('download', 'campus_deadlines.ics');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200 max-w-4xl">
       
       {/* Title & Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-cream-border">
-        <h1 className="font-serif text-3xl sm:text-4xl font-bold tracking-tight text-ink">
-          Deadlines
-        </h1>
+        <div>
+          <h1 className="font-serif text-3xl sm:text-4xl font-bold tracking-tight text-ink">
+            Deadlines
+          </h1>
+          <p className="text-xs text-ink-muted mt-1">
+            Confirmed academic milestones & student deliverables
+          </p>
+        </div>
 
-        {/* Status Tabs */}
-        <div className="flex items-center gap-2">
+        {/* Action Controls & Status Tabs */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Calendar Export Button */}
+          <button
+            onClick={handleExportICS}
+            className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-cream-card hover:bg-cream border border-cream-border text-forest flex items-center gap-1.5 transition-colors shadow-2xs"
+            title="Download .ics file for Google Calendar, Apple Calendar or Outlook"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Export Calendar (.ics)</span>
+          </button>
+
           {['upcoming', 'overdue', 'completed'].map((tab) => {
             const isSelected = activeTab === tab;
             return (
@@ -118,9 +214,16 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
                 {/* Deadline Content & Pill */}
                 <div className="flex-1 min-w-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-cream-border/60">
                   <div className="min-w-0">
-                    <h3 className="font-bold text-sm sm:text-base text-ink group-hover:text-forest transition-colors truncate">
-                      {item.deadline_label || item.subject}
-                    </h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-bold text-sm sm:text-base text-ink group-hover:text-forest transition-colors truncate">
+                        {item.deadline_label || item.subject}
+                      </h3>
+                      {item.isUserCorrected && (
+                        <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.5 rounded-full border border-sage/40 shrink-0">
+                          Edited by you
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-ink-muted truncate mt-0.5">
                       {item.senderName || item.sender.split('<')[0]}
                     </p>
@@ -141,4 +244,3 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
     </div>
   );
 }
-

@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useUser, computeInitials, formatGreeting } from '../context/UserContext';
 import { X, Check, User, Mail, Image, RotateCcw } from 'lucide-react';
 
-export default function SettingsModal() {
+export default function SettingsModal({ onResetDemo }) {
   const { user, updateUser, isSettingsOpen, closeSettings, setIsFirstRunOpen } = useUser();
   const [name, setName] = useState(user.name || '');
   const [email, setEmail] = useState(user.email || '');
   const [avatarUrl, setAvatarUrl] = useState(user.avatarUrl || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [isResettingDemo, setIsResettingDemo] = useState(false);
+  const [demoResetNotice, setDemoResetNotice] = useState(false);
 
   // Sync internal form when modal opens
   useEffect(() => {
@@ -162,6 +164,44 @@ export default function SettingsModal() {
               placeholder="https://example.com/avatar.jpg"
               className="w-full px-3.5 py-2.5 text-sm bg-cream-card border border-cream-border rounded-xl text-ink placeholder:text-ink-muted/50 focus:outline-none focus:border-forest focus:ring-1 focus:ring-forest transition-all"
             />
+          </div>
+
+          {/* Step 14: Demo Showcase & Reset Controls */}
+          <div className="p-3.5 rounded-xl bg-cream border border-cream-border space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold text-ink uppercase tracking-wider">
+                  Showcase & Demo Data
+                </p>
+                <p className="text-[11px] text-ink-muted">
+                  Restore default collegiate sample emails, deadlines & reminders.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (onResetDemo) {
+                    setIsResettingDemo(true);
+                    await onResetDemo();
+                    setIsResettingDemo(false);
+                    setDemoResetNotice(true);
+                    setTimeout(() => setDemoResetNotice(false), 2500);
+                  }
+                }}
+                disabled={isResettingDemo}
+                className="px-3 py-1.5 bg-cream-card hover:bg-cream border border-cream-border text-ink text-xs font-semibold rounded-lg transition-colors shadow-2xs inline-flex items-center gap-1.5 shrink-0"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 text-forest ${isResettingDemo ? 'animate-spin' : ''}`} />
+                <span>{isResettingDemo ? 'Resetting...' : 'Reset Demo Data'}</span>
+              </button>
+            </div>
+
+            {demoResetNotice && (
+              <p className="text-[11px] font-bold text-forest animate-in fade-in">
+                ✓ Showcase demo data successfully reloaded.
+              </p>
+            )}
           </div>
 
           {/* Action Buttons */}

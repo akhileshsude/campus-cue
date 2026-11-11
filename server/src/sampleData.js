@@ -1,9 +1,15 @@
 // Realistic sample email dataset for Campus Cue
 // Includes tricky edge cases: relative dates, vague deadlines, multiple dates, newsletters, and urgent exam notices
 
+import crypto from 'node:crypto';
+
 const now = new Date();
 const hoursAgo = (h) => new Date(now.getTime() - h * 60 * 60 * 1000).toISOString();
 const daysFromNow = (d, h = 0) => new Date(now.getTime() + (d * 24 + h) * 60 * 60 * 1000).toISOString();
+
+function quickHash(sender, subject, body) {
+  return crypto.createHash('sha256').update(`${(sender || '').trim().toLowerCase()}|${(subject || '').trim().toLowerCase()}|${(body || '').replace(/\s+/g, ' ').trim()}`).digest('hex');
+}
 
 export const sampleDigest = {
   date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }),
@@ -332,14 +338,34 @@ Campus IT Helpdesk`,
   }
 ];
 
+sampleEmails.forEach(email => {
+  if (!email.content_hash) {
+    email.content_hash = quickHash(email.sender, email.subject, email.body);
+  }
+  if (!email.source) {
+    email.source = 'sample';
+  }
+});
+
 export const sampleReminders = sampleEmails
-  .filter(email => email.needs_followup)
-  .map(email => ({
-    id: `rem-${email.id}`,
-    emailId: email.id,
-    subject: email.subject,
-    sender: email.senderName,
-    action: email.required_action,
-    deadline: email.deadline,
-    is_completed: false,
-  }));
+  .filter(email => email.needs_followup || email.needs_reply || email.needs_action)
+  .map(email => {
+    const isReply = email.needs_reply || /reply|confirm|rsvp|slot/i.test(email.subject + ' ' + (email.required_action || ''));
+    return {
+      id: `rem-${email.id}`,
+      email_id: email.id,
+      emailId: email.id,
+      subject: email.subject,
+      sender: email.senderName || email.sender,
+      action: email.required_action || 'Complete follow-up',
+      reminder_type: isReply ? 'reply' : 'action',
+      reminder_note: email.reminder_note || email.required_action || 'Review and take action',
+      reminder_text: `${email.subject}: ${email.required_action || 'Follow up'}`,
+      status: 'pending',
+      deadline: email.deadline,
+      due_date: email.deadline,
+      snoozed_until: null,
+      is_completed: false,
+      created_at: email.received_at,
+    };
+  });

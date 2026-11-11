@@ -1,5 +1,5 @@
 import React from 'react';
-import { Search, Bell, Sparkles, RefreshCw, Menu, User as UserIcon } from 'lucide-react';
+import { Search, Bell, Sparkles, RefreshCw, Menu, User as UserIcon, MailPlus } from 'lucide-react';
 import { useUser } from '../context/UserContext';
 
 export default function TopBar({ 
@@ -9,6 +9,7 @@ export default function TopBar({
   isRefreshing,
   onProcessAll,
   isProcessingAll,
+  onOpenIngest,
   unreadCount = 0
 }) {
   const { user, initials, openSettings } = useUser();
@@ -30,6 +31,18 @@ export default function TopBar({
 
       {/* Right Controls */}
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+        {/* Simulate / Ingest Email Button */}
+        {onOpenIngest && (
+          <button
+            onClick={onOpenIngest}
+            title="Ingest raw email & run AI pipeline"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-forest bg-cream-card hover:bg-cream border border-cream-border rounded-xl transition-all shadow-xs"
+          >
+            <MailPlus className="w-3.5 h-3.5 text-forest" />
+            <span>+ Ingest</span>
+          </button>
+        )}
+
         {/* Run AI Pipeline Button */}
         {onProcessAll && (
           <button
