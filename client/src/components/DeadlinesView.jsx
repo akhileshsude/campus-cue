@@ -1,11 +1,16 @@
 import React, { useState, useMemo } from 'react';
-import { Clock, Calendar, AlertTriangle, ArrowRight, CheckCircle2, Download } from 'lucide-react';
+import { Clock, Calendar, AlertTriangle, ArrowRight, CheckCircle2, Circle, Download } from 'lucide-react';
 
-export default function DeadlinesView({ emails = [], onSelectEmail }) {
+export default function DeadlinesView({ emails = [], reminders = [], onSelectEmail, onToggleDeadlineDone }) {
   const [activeTab, setActiveTab] = useState('upcoming'); // 'upcoming' | 'overdue' | 'completed'
 
   const deadlines = useMemo(() => {
     const now = new Date();
+    const doneByEmail = new Map(
+      (reminders || [])
+        .filter(r => r.status === 'done' || r.is_completed)
+        .map(r => [r.email_id || r.emailId, true])
+    );
 
     return emails
       .filter((e) => Boolean(e.user_deadline || e.deadline))
@@ -13,12 +18,16 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
         const effectiveDeadline = item.user_deadline || item.deadline;
         const deadlineDate = new Date(effectiveDeadline);
         const diffDays = Math.ceil((deadlineDate - now) / (1000 * 60 * 60 * 24));
-        const isOverdue = diffDays < 0;
+        const isCompleted = Boolean(item.deadline_completed || doneByEmail.get(item.id));
+        const isOverdue = !isCompleted && diffDays < 0;
 
         let statusText = 'Info';
         let statusClass = 'badge-info';
 
-        if (item.deadline_confidence === 'uncertain' && !item.user_deadline) {
+        if (isCompleted) {
+          statusText = 'Completed';
+          statusClass = 'bg-forest/15 text-forest border border-forest/30';
+        } else if (item.deadline_confidence === 'uncertain' && !item.user_deadline) {
           statusText = 'Unconfirmed · Verify';
           statusClass = 'badge-unconfirmed';
         } else if (isOverdue) {
@@ -36,6 +45,7 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
           ...item,
           effectiveDeadline,
           diffDays,
+          isCompleted,
           isOverdue,
           statusText,
           statusClass,
@@ -47,13 +57,13 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
         };
       })
       .sort((a, b) => new Date(a.effectiveDeadline) - new Date(b.effectiveDeadline));
-  }, [emails]);
+  }, [emails, reminders]);
 
   // Filter deadlines by tab
   const filteredDeadlines = deadlines.filter((d) => {
-    if (activeTab === 'overdue') return d.isOverdue;
-    if (activeTab === 'completed') return false;
-    return !d.isOverdue;
+    if (activeTab === 'overdue') return !d.isCompleted && d.isOverdue;
+    if (activeTab === 'completed') return d.isCompleted;
+    return !d.isCompleted && !d.isOverdue;
   });
 
   // RFC 5545 iCalendar Export (.ics file generation)
@@ -81,7 +91,10 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
         .replace(/\n/g, '\\n');
 
     const confirmedItems = deadlines.filter(
-      (d) => d.effectiveDeadline && (d.deadline_confidence !== 'uncertain' || d.isUserCorrected)
+      (d) =>
+        !d.isCompleted &&
+        d.effectiveDeadline &&
+        (d.deadline_confidence !== 'uncertain' || d.isUserCorrected)
     );
 
     if (confirmedItems.length === 0) {
@@ -229,10 +242,28 @@ export default function DeadlinesView({ emails = [], onSelectEmail }) {
                     </p>
                   </div>
 
-                  <div className="shrink-0 flex items-center gap-2">
+                  <div className="shrink-0 flex items-center gap-2.5">
                     <span className={`text-[11px] font-bold px-3 py-0.5 rounded-full ${item.statusClass}`}>
                       {item.statusText}
                     </span>
+
+                    {onToggleDeadlineDone && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleDeadlineDone(item.id, !item.isCompleted);
+                        }}
+                        title={item.isCompleted ? 'Mark pending' : 'Mark deadline completed'}
+                        className="p-1.5 rounded-lg hover:bg-cream text-ink-muted hover:text-forest transition-colors"
+                      >
+                        {item.isCompleted ? (
+                          <CheckCircle2 className="w-4 h-4 text-forest" />
+                        ) : (
+                          <Circle className="w-4 h-4" />
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

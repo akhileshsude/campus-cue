@@ -4,15 +4,29 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const API_KEY = process.env.GEMINI_API_KEY || process.env.AI_API_KEY;
-
 let aiClient = null;
-if (API_KEY && !API_KEY.includes('your_gemini')) {
-  try {
-    aiClient = new GoogleGenAI({ apiKey: API_KEY });
-  } catch (err) {
-    console.warn('⚠️ Could not initialize GoogleGenAI client:', err.message);
+
+function initAiClient(key) {
+  const cleanKey = (key || '').trim();
+  if (cleanKey && !cleanKey.includes('your_gemini')) {
+    try {
+      return new GoogleGenAI({ apiKey: cleanKey });
+    } catch (err) {
+      console.warn('⚠️ Could not initialize GoogleGenAI client:', err.message);
+    }
   }
+  return null;
+}
+
+aiClient = initAiClient(process.env.GEMINI_API_KEY || process.env.AI_API_KEY);
+
+export function reloadAiClient(newKey) {
+  aiClient = initAiClient(newKey);
+  return Boolean(aiClient);
+}
+
+export function isAiConfigured() {
+  return Boolean(aiClient);
 }
 
 // Allowed enum constants

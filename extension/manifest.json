@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "clg.inbox Webmail Sync",
+  "version": "1.0.0",
+  "description": "Import emails directly from your open Gmail, Outlook, or university webmail tab into clg.inbox (Campus Cue) with zero OAuth or IMAP passwords.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "http://localhost:5001/*",
+    "http://127.0.0.1:5001/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send emails to clg.inbox"
+  }
+}
+

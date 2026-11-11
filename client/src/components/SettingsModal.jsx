@@ -1,15 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useUser, computeInitials, formatGreeting } from '../context/UserContext';
-import { X, Check, User, Mail, Image, RotateCcw } from 'lucide-react';
+import { apiFetch } from '../utils/api';
+import { X, Check, User, Mail, Image, RotateCcw, Trash2, Activity, KeyRound, Eye, EyeOff, RefreshCw, Sparkles } from 'lucide-react';
 
-export default function SettingsModal({ onResetDemo }) {
+export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus = null, onHealthUpdated }) {
   const { user, updateUser, isSettingsOpen, closeSettings, setIsFirstRunOpen } = useUser();
   const [name, setName] = useState(user.name || '');
   const [email, setEmail] = useState(user.email || '');
   const [avatarUrl, setAvatarUrl] = useState(user.avatarUrl || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isResettingDemo, setIsResettingDemo] = useState(false);
-  const [demoResetNotice, setDemoResetNotice] = useState(false);
+  const [demoNoticeText, setDemoNoticeText] = useState('');
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [isSavingAiKey, setIsSavingAiKey] = useState(false);
+  const [aiKeyNotice, setAiKeyNotice] = useState(null);
 
   // Sync internal form when modal opens
   useEffect(() => {
@@ -58,6 +63,32 @@ export default function SettingsModal({ onResetDemo }) {
     setAvatarUrl('');
     closeSettings();
     setIsFirstRunOpen(true);
+  };
+
+  const handleSaveGeminiKey = async () => {
+    setIsSavingAiKey(true);
+    setAiKeyNotice(null);
+    try {
+      const res = await apiFetch('/api/settings/ai-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: geminiKeyInput.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAiKeyNotice({ type: 'error', text: data.error || 'Could not save Gemini API key.' });
+      } else {
+        setGeminiKeyInput('');
+        setAiKeyNotice({ type: 'success', text: data.message });
+        if (onHealthUpdated) {
+          await onHealthUpdated();
+        }
+      }
+    } catch (err) {
+      setAiKeyNotice({ type: 'error', text: err.message || 'Could not reach backend server.' });
+    } finally {
+      setIsSavingAiKey(false);
+    }
   };
 
   return (
@@ -166,40 +197,156 @@ export default function SettingsModal({ onResetDemo }) {
             />
           </div>
 
-          {/* Step 14: Demo Showcase & Reset Controls */}
-          <div className="p-3.5 rounded-xl bg-cream border border-cream-border space-y-2">
-            <div className="flex items-center justify-between">
+          {/* Live System Diagnostics & Inbox Mode Controls */}
+          <div className="p-3.5 rounded-xl bg-cream border border-cream-border space-y-3">
+            {healthStatus && (
+              <div className="space-y-1.5 pb-2.5 border-b border-cream-border/70">
+                <p className="text-xs font-bold text-ink uppercase tracking-wider flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-forest" />
+                  <span>Runtime Status</span>
+                </p>
+                <div className="grid grid-cols-2 gap-1.5 text-[11px] text-ink-muted">
+                  <span>
+                    AI Engine: <strong className="text-ink">{healthStatus.geminiConfigured ? 'Gemini Live' : 'Offline Heuristic'}</strong>
+                  </span>
+                  <span>
+                    Storage: <strong className="text-ink">{healthStatus.supabaseConnected ? 'Supabase DB' : 'Local Persistent Disk'}</strong>
+                  </span>
+                  <span>
+                    Mode: <strong className="text-ink">{healthStatus.dataMode === 'live' ? 'Live Real Inbox' : 'Showcase Demo'}</strong>
+                  </span>
+                  <span>
+                    Synced Accounts: <strong className="text-ink">{healthStatus.connectedAccountsCount || 0}</strong>
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Inline Gemini API Key Configuration */}
+            <div className="pb-2.5 border-b border-cream-border/70 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-ink uppercase tracking-wider flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-forest" />
+                  <span>Gemini AI Key</span>
+                </label>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  healthStatus?.geminiConfigured
+                    ? 'bg-forest/15 text-forest'
+                    : 'bg-cream-card border border-cream-border text-ink-muted'
+                }`}>
+                  {healthStatus?.geminiConfigured ? 'Gemini Live' : 'Offline Heuristic'}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type={showGeminiKey ? 'text' : 'password'}
+                    value={geminiKeyInput}
+                    onChange={(e) => setGeminiKeyInput(e.target.value)}
+                    placeholder={
+                      healthStatus?.geminiConfigured
+                        ? 'Key active — paste new AIza... key to replace'
+                        : 'AIza... (paste free Google AI Studio key)'
+                    }
+                    className="w-full pl-3 pr-9 py-2 text-xs bg-cream-card border border-cream-border rounded-lg text-ink placeholder:text-ink-muted/60 focus:outline-none focus:border-forest font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGeminiKey(!showGeminiKey)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
+                    title={showGeminiKey ? 'Hide API key' : 'Show API key'}
+                  >
+                    {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSaveGeminiKey}
+                  disabled={isSavingAiKey || (!geminiKeyInput.trim() && !healthStatus?.geminiConfigured)}
+                  className="px-3 py-2 bg-forest hover:bg-forest-hover text-[#F1EBDD] text-xs font-semibold rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                >
+                  {isSavingAiKey ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-gold" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5 text-gold" />
+                  )}
+                  <span>
+                    {isSavingAiKey
+                      ? 'Saving...'
+                      : geminiKeyInput.trim()
+                      ? 'Activate Gemini'
+                      : 'Switch to Offline'}
+                  </span>
+                </button>
+              </div>
+
+              <p className="text-[10px] text-ink-muted">
+                Saved locally to <code className="bg-cream-card px-1 rounded border border-cream-border">server/.env</code> and activated immediately without restarting.
+              </p>
+
+              {aiKeyNotice && (
+                <p className={`text-[11px] font-semibold ${
+                  aiKeyNotice.type === 'error' ? 'text-red-700' : 'text-forest'
+                }`}>
+                  {aiKeyNotice.text}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="text-xs font-bold text-ink uppercase tracking-wider">
-                  Showcase & Demo Data
+                  Inbox Data Controls
                 </p>
                 <p className="text-[11px] text-ink-muted">
-                  Restore default collegiate sample emails, deadlines & reminders.
+                  Clear sample showcase items for a real inbox, or reload demo data.
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={async () => {
-                  if (onResetDemo) {
-                    setIsResettingDemo(true);
-                    await onResetDemo();
-                    setIsResettingDemo(false);
-                    setDemoResetNotice(true);
-                    setTimeout(() => setDemoResetNotice(false), 2500);
-                  }
-                }}
-                disabled={isResettingDemo}
-                className="px-3 py-1.5 bg-cream-card hover:bg-cream border border-cream-border text-ink text-xs font-semibold rounded-lg transition-colors shadow-2xs inline-flex items-center gap-1.5 shrink-0"
-              >
-                <RotateCcw className={`w-3.5 h-3.5 text-forest ${isResettingDemo ? 'animate-spin' : ''}`} />
-                <span>{isResettingDemo ? 'Resetting...' : 'Reset Demo Data'}</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                {onClearDemo && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setIsResettingDemo(true);
+                      await onClearDemo();
+                      setIsResettingDemo(false);
+                      setDemoNoticeText('Sample data cleared. Live Inbox Mode active.');
+                      setTimeout(() => setDemoNoticeText(''), 2500);
+                    }}
+                    disabled={isResettingDemo}
+                    className="px-2.5 py-1.5 bg-cream-card hover:bg-cream border border-cream-border text-ink text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1 shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-ink-muted" />
+                    <span>Clear Samples</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (onResetDemo) {
+                      setIsResettingDemo(true);
+                      await onResetDemo();
+                      setIsResettingDemo(false);
+                      setDemoNoticeText('Showcase demo data reloaded.');
+                      setTimeout(() => setDemoNoticeText(''), 2500);
+                    }
+                  }}
+                  disabled={isResettingDemo}
+                  className="px-2.5 py-1.5 bg-cream-card hover:bg-cream border border-cream-border text-ink text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1 shrink-0"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 text-forest ${isResettingDemo ? 'animate-spin' : ''}`} />
+                  <span>{isResettingDemo ? 'Working...' : 'Reset Demo'}</span>
+                </button>
+              </div>
             </div>
 
-            {demoResetNotice && (
+            {demoNoticeText && (
               <p className="text-[11px] font-bold text-forest animate-in fade-in">
-                ✓ Showcase demo data successfully reloaded.
+                ✓ {demoNoticeText}
               </p>
             )}
           </div>

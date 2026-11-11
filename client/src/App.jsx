@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import LandingPage from './components/LandingPage';
@@ -12,43 +12,54 @@ import MobileBottomNav from './components/MobileBottomNav';
 import FirstRunModal from './components/FirstRunModal';
 import SettingsModal from './components/SettingsModal';
 import IngestModal from './components/IngestModal';
-import { RefreshCw, AlertCircle } from 'lucide-react';
-
-const API_BASE = import.meta.env.VITE_API_URL || '';
+import { useUser } from './context/UserContext';
+import { apiFetch } from './utils/api';
+import { AlertCircle } from 'lucide-react';
 
 export default function App() {
+  const { user, updateUser } = useUser();
   const [emails, setEmails] = useState([]);
   const [digest, setDigest] = useState(null);
   const [reminders, setReminders] = useState([]);
+  const [healthStatus, setHealthStatus] = useState(null);
+  const [dataMode, setDataMode] = useState('demo');
+  const [showArchived, setShowArchived] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [isProcessingSingle, setIsProcessingSingle] = useState(false);
   const [isIngestModalOpen, setIsIngestModalOpen] = useState(false);
+  const [ingestInitialTab, setIngestInitialTab] = useState('paste');
+  const [oauthBanner, setOauthBanner] = useState(null);
   const [isIngesting, setIsIngesting] = useState(false);
   const [isRegeneratingDigest, setIsRegeneratingDigest] = useState(false);
+  const lastAutoRefreshRef = useRef(0);
 
   // App Navigation: 'home' | 'digest' | 'inbox' | 'deadlines' | 'actions' | 'detail' | 'landing'
   const [currentView, setCurrentView] = useState('home');
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Fetch initial data from backend API
-  const fetchData = async () => {
+  const fetchData = async (archivedOverride = showArchived) => {
     try {
       setError(null);
-      
-      const [emailsRes, digestRes, remindersRes] = await Promise.all([
-        fetch(`${API_BASE}/api/emails`),
-        fetch(`${API_BASE}/api/digest`),
-        fetch(`${API_BASE}/api/reminders`)
+      const studentNameParam = encodeURIComponent(user?.name || '');
+      const emailUrl = archivedOverride ? '/api/emails?onlyArchived=true' : '/api/emails';
+
+      const [emailsRes, digestRes, remindersRes, healthRes] = await Promise.all([
+        apiFetch(emailUrl),
+        apiFetch(`/api/digest?studentName=${studentNameParam}`),
+        apiFetch('/api/reminders'),
+        apiFetch('/api/health'),
       ]);
 
       if (!emailsRes.ok) throw new Error(`Emails API error: ${emailsRes.status}`);
-      
+
       const emailsData = await emailsRes.json();
       setEmails(emailsData.emails || []);
+      if (emailsData.dataMode) setDataMode(emailsData.dataMode);
 
       if (digestRes.ok) {
         const digestData = await digestRes.json();
@@ -58,6 +69,12 @@ export default function App() {
       if (remindersRes.ok) {
         const remindersData = await remindersRes.json();
         setReminders(remindersData.reminders || []);
+      }
+
+      if (healthRes.ok) {
+        const hData = await healthRes.json();
+        setHealthStatus(hData);
+        if (hData.dataMode) setDataMode(hData.dataMode);
       }
     } catch (err) {
       console.error('Failed to fetch data from backend:', err);
@@ -70,30 +87,98 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
+
+    if (typeof window !== 'undefined' && window.location.search) {
+      const params = new URLSearchParams(window.location.search);
+      const gmailStatus = params.get('gmail');
+      const msStatus = params.get('microsoft');
+      const connectedEmail = params.get('email');
+      const gmailError = params.get('gmail_error');
+      const msError = params.get('microsoft_error');
+
+      if (gmailStatus === 'connected' || msStatus === 'connected') {
+        const providerName = msStatus === 'connected' ? 'Microsoft / Outlook' : 'Google / Gmail';
+        if (connectedEmail && !user?.email) {
+          updateUser({ email: connectedEmail });
+        }
+        setOauthBanner({
+          type: 'success',
+          text: `Connected ${connectedEmail || providerName} via ${providerName} OAuth and synced your latest real emails!`,
+        });
+        setIngestInitialTab('connect');
+        setIsIngestModalOpen(true);
+        window.history.replaceState({}, '', window.location.pathname);
+      } else if (gmailError || msError) {
+        setOauthBanner({
+          type: 'error',
+          text: gmailError
+            ? `Google OAuth failed (${gmailError}). If your university restricts OAuth apps or test users, use Universal IMAP with a 16-char App Password or .eml drop right here!`
+            : `Microsoft OAuth failed (${msError}). Try Universal IMAP or Auto-Forwarding Webhook below.`,
+        });
+        setIngestInitialTab('connect');
+        setIsIngestModalOpen(true);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    }
   }, []);
 
-  const handleRefresh = () => {
+  // Refresh data cleanly if user updates their email identity or toggles archive view
+  useEffect(() => {
+    if (!loading) {
+      fetchData(showArchived);
+    }
+  }, [user?.email, showArchived]);
+
+  // Auto-refresh when switching back to this tab (e.g. after 1-click extension sync)
+  useEffect(() => {
+    const maybeRefresh = () => {
+      if (loading || document.hidden) return;
+      const now = Date.now();
+      if (now - lastAutoRefreshRef.current < 8000) return;
+      lastAutoRefreshRef.current = now;
+      fetchData(showArchived);
+    };
+
+    window.addEventListener('focus', maybeRefresh);
+    document.addEventListener('visibilitychange', maybeRefresh);
+    return () => {
+      window.removeEventListener('focus', maybeRefresh);
+      document.removeEventListener('visibilitychange', maybeRefresh);
+    };
+  }, [user?.email, showArchived, loading]);
+
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    fetchData();
+    try {
+      if (healthStatus?.connectedAccountsCount > 0) {
+        await apiFetch('/api/emails/sync-all', { method: 'POST' });
+      }
+    } catch {
+      // Proceed to refresh current store even if sync-all encounters transient failure
+    }
+    await fetchData(showArchived);
   };
 
-  // Select an email and view detail
+  const handleOpenConnectInbox = () => {
+    setIngestInitialTab('connect');
+    setOauthBanner(null);
+    setIsIngestModalOpen(true);
+  };
+
   const handleSelectEmail = (email) => {
     setSelectedEmail(email);
     setCurrentView('detail');
-    // Mark as read
     if (!email.is_read) {
       handleToggleRead(email.id, true);
     }
   };
 
-  // Select an email by its ID (used by Digest links & Action links)
   const handleSelectEmailById = (emailId) => {
     const found = emails.find(e => e.id === emailId);
     if (found) {
       handleSelectEmail(found);
     } else {
-      fetch(`${API_BASE}/api/emails`)
+      apiFetch('/api/emails')
         .then(r => r.ok && r.json())
         .then(data => {
           if (data.emails) {
@@ -105,11 +190,14 @@ export default function App() {
     }
   };
 
-  // Step 8: Dynamic Academic Digest Regeneration
   const handleRegenerateDigest = async () => {
     setIsRegeneratingDigest(true);
     try {
-      const res = await fetch(`${API_BASE}/api/digest/generate`, { method: 'POST' });
+      const res = await apiFetch('/api/digest/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentName: user?.name || '' }),
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.digest) {
@@ -123,7 +211,6 @@ export default function App() {
     }
   };
 
-  // Step 9: Follow-up Reminders Status & Snooze
   const handleUpdateReminderStatus = async (id, updates) => {
     setReminders(prev =>
       prev.map(r => {
@@ -142,7 +229,7 @@ export default function App() {
     );
 
     try {
-      await fetch(`${API_BASE}/api/reminders/${id}`, {
+      await apiFetch(`/api/reminders/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -152,11 +239,10 @@ export default function App() {
     }
   };
 
-  // Step 10: Ingestion Handlers (Manual Paste, .eml upload, Gmail sync)
   const handleIngestEmail = async (rawEmail) => {
     setIsIngesting(true);
     try {
-      const res = await fetch(`${API_BASE}/api/emails/process`, {
+      const res = await apiFetch('/api/emails/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -168,12 +254,10 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         if (data.email) {
-          setEmails(prev => [data.email, ...prev]);
+          await fetchData(false);
           setSelectedEmail(data.email);
           setCurrentView('detail');
           setIsIngestModalOpen(false);
-          fetch(`${API_BASE}/api/reminders`).then(r => r.ok && r.json()).then(d => d?.reminders && setReminders(d.reminders));
-          fetch(`${API_BASE}/api/digest`).then(r => r.ok && r.json()).then(d => d?.digest && setDigest(d.digest));
         }
       }
     } catch (err) {
@@ -183,26 +267,20 @@ export default function App() {
     }
   };
 
-  const handleEmlUploaded = (newEmails = []) => {
-    if (newEmails.length > 0) {
-      setEmails(prev => [...newEmails, ...prev]);
-      setCurrentView('inbox');
-      setIsIngestModalOpen(false);
-      fetch(`${API_BASE}/api/reminders`).then(r => r.ok && r.json()).then(d => d?.reminders && setReminders(d.reminders));
-      fetch(`${API_BASE}/api/digest`).then(r => r.ok && r.json()).then(d => d?.digest && setDigest(d.digest));
-    }
+  const handleEmlUploaded = async () => {
+    setShowArchived(false);
+    await fetchData(false);
+    setCurrentView('inbox');
+    setIsIngestModalOpen(false);
   };
 
-  const handleGmailSynced = (newEmails = []) => {
-    if (newEmails.length > 0) {
-      setEmails(prev => [...newEmails, ...prev]);
-      setIsIngestModalOpen(false);
-      fetch(`${API_BASE}/api/reminders`).then(r => r.ok && r.json()).then(d => d?.reminders && setReminders(d.reminders));
-      fetch(`${API_BASE}/api/digest`).then(r => r.ok && r.json()).then(d => d?.digest && setDigest(d.digest));
-    }
+  const handleInboxSynced = async () => {
+    setShowArchived(false);
+    await fetchData(false);
+    setIsIngestModalOpen(false);
+    setCurrentView('inbox');
   };
 
-  // Step 13: Student Correction Override Handler (Category, Priority, Deadline)
   const handleOverrideEmail = async (emailId, overrides) => {
     setEmails(prev =>
       prev.map(e => {
@@ -212,7 +290,10 @@ export default function App() {
           ...(overrides.category !== undefined ? { user_category: overrides.category } : {}),
           ...(overrides.priority !== undefined ? { user_priority: overrides.priority } : {}),
           ...(overrides.deadline !== undefined ? { user_deadline: overrides.deadline } : {}),
-          edited_by_user: true,
+          ...(overrides.deadline_completed !== undefined ? { deadline_completed: overrides.deadline_completed } : {}),
+          edited_by_user: Boolean(
+            overrides.category ?? e.user_category ?? overrides.priority ?? e.user_priority ?? overrides.deadline ?? e.user_deadline
+          ),
         };
       })
     );
@@ -223,12 +304,12 @@ export default function App() {
         ...(overrides.category !== undefined ? { user_category: overrides.category } : {}),
         ...(overrides.priority !== undefined ? { user_priority: overrides.priority } : {}),
         ...(overrides.deadline !== undefined ? { user_deadline: overrides.deadline } : {}),
-        edited_by_user: true,
+        ...(overrides.deadline_completed !== undefined ? { deadline_completed: overrides.deadline_completed } : {}),
       }));
     }
 
     try {
-      const res = await fetch(`${API_BASE}/api/emails/${emailId}/override`, {
+      const res = await apiFetch(`/api/emails/${emailId}/override`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(overrides),
@@ -247,13 +328,14 @@ export default function App() {
     }
   };
 
-  // Step 11: Single Email Reprocess on manual click
+  const handleToggleDeadlineDone = async (emailId, isCompleted) => {
+    await handleOverrideEmail(emailId, { deadline_completed: isCompleted });
+  };
+
   const handleReprocessEmail = async (emailId) => {
     setIsProcessingSingle(true);
     try {
-      const res = await fetch(`${API_BASE}/api/emails/${emailId}/reprocess`, {
-        method: 'POST',
-      });
+      const res = await apiFetch(`/api/emails/${emailId}/reprocess`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         if (data.email) {
@@ -270,38 +352,70 @@ export default function App() {
     }
   };
 
-  // Step 14: Reset Demo Data
+  const handleArchiveEmail = async (emailId, isArchived) => {
+    try {
+      const res = await apiFetch(`/api/emails/${emailId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_archived: isArchived }),
+      });
+      if (res.ok) {
+        if (currentView === 'detail' && selectedEmail?.id === emailId) {
+          setSelectedEmail(null);
+          setCurrentView('inbox');
+        }
+        await fetchData(showArchived);
+      }
+    } catch (err) {
+      console.error('Failed to archive email:', err);
+    }
+  };
+
+  const handleDeleteEmail = async (emailId) => {
+    try {
+      const res = await apiFetch(`/api/emails/${emailId}`, { method: 'DELETE' });
+      if (res.ok) {
+        if (currentView === 'detail' && selectedEmail?.id === emailId) {
+          setSelectedEmail(null);
+          setCurrentView('inbox');
+        }
+        await fetchData(showArchived);
+      }
+    } catch (err) {
+      console.error('Failed to delete email:', err);
+    }
+  };
+
+  const handleClearDemo = async () => {
+    try {
+      const res = await apiFetch('/api/emails/clear-demo', { method: 'POST' });
+      if (res.ok) {
+        setShowArchived(false);
+        await fetchData(false);
+      }
+    } catch (err) {
+      console.error('Failed to clear demo data:', err);
+    }
+  };
+
   const handleResetDemo = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/reset-demo`, { method: 'POST' });
+      const res = await apiFetch('/api/reset-demo', { method: 'POST' });
       if (res.ok) {
-        await fetchData();
+        setShowArchived(false);
+        await fetchData(false);
       }
     } catch (err) {
       console.error('Failed to reset demo:', err);
     }
   };
 
-  // Update Category Override (backward-compatible)
-  const handleUpdateCategory = async (emailId, newCategory) => {
-    await handleOverrideEmail(emailId, { category: newCategory });
-  };
-
-  // Process all emails with Gemini AI batch pipeline
   const handleProcessAll = async () => {
     setIsProcessingAll(true);
     try {
-      const res = await fetch(`${API_BASE}/api/emails/process-all`, { method: 'POST' });
+      const res = await apiFetch('/api/emails/process-all', { method: 'POST' });
       if (res.ok) {
-        const data = await res.json();
-        if (data.emails) {
-          setEmails(data.emails);
-        }
-      }
-      const remRes = await fetch(`${API_BASE}/api/reminders`);
-      if (remRes.ok) {
-        const remData = await remRes.json();
-        setReminders(remData.reminders || []);
+        await fetchData(showArchived);
       }
     } catch (err) {
       console.error('Batch processing error:', err);
@@ -310,35 +424,14 @@ export default function App() {
     }
   };
 
-  // Toggle Reminder completion
-  const handleToggleReminder = async (id, isCompleted) => {
-    setReminders(prev =>
-      prev.map(r => (r.id === id ? { ...r, is_completed: isCompleted } : r))
-    );
-
-    try {
-      await fetch(`${API_BASE}/api/reminders/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_completed: isCompleted }),
-      });
-    } catch (err) {
-      console.error('Failed to update reminder:', err);
-    }
-  };
-
-  // Toggle Email read status
   const handleToggleRead = async (id, isRead) => {
-    setEmails(prev =>
-      prev.map(e => (e.id === id ? { ...e, is_read: isRead } : e))
-    );
-
+    setEmails(prev => prev.map(e => (e.id === id ? { ...e, is_read: isRead } : e)));
     if (selectedEmail && selectedEmail.id === id) {
       setSelectedEmail(prev => ({ ...prev, is_read: isRead }));
     }
 
     try {
-      await fetch(`${API_BASE}/api/emails/${id}/read`, {
+      await apiFetch(`/api/emails/${id}/read`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_read: isRead }),
@@ -348,20 +441,16 @@ export default function App() {
     }
   };
 
-  // Derived statistics (Critical rule: uncertain deadlines are excluded from upcoming count)
   const stats = useMemo(() => {
-    const confirmedDeadlines = emails.filter(
-      e => {
-        const d = e.user_deadline || e.deadline;
-        return Boolean(d) && e.deadline_confidence !== 'uncertain';
-      }
-    );
-    const uncertainDeadlines = emails.filter(
-      e => {
-        const d = e.user_deadline || e.deadline;
-        return Boolean(d) && e.deadline_confidence === 'uncertain' && !e.user_deadline;
-      }
-    );
+    const activeEmails = showArchived ? [] : emails;
+    const confirmedDeadlines = activeEmails.filter(e => {
+      const d = e.user_deadline || e.deadline;
+      return Boolean(d) && !e.deadline_completed && e.deadline_confidence !== 'uncertain';
+    });
+    const uncertainDeadlines = activeEmails.filter(e => {
+      const d = e.user_deadline || e.deadline;
+      return Boolean(d) && !e.deadline_completed && e.deadline_confidence === 'uncertain' && !e.user_deadline;
+    });
 
     const now = new Date();
     const activeReminders = reminders.filter(r => {
@@ -371,16 +460,15 @@ export default function App() {
     });
 
     return {
-      total: emails.length,
-      unread: emails.filter(e => !e.is_read).length,
-      highPriority: emails.filter(e => ((e.user_priority || e.priority) || '').toLowerCase() === 'high').length,
+      total: activeEmails.length,
+      unread: activeEmails.filter(e => !e.is_read).length,
+      highPriority: activeEmails.filter(e => ((e.user_priority || e.priority) || '').toLowerCase() === 'high').length,
       deadlines: confirmedDeadlines.length,
       uncertainDeadlines: uncertainDeadlines.length,
       reminders: activeReminders.length,
     };
-  }, [emails, reminders]);
+  }, [emails, reminders, showArchived]);
 
-  // If viewing Public Landing Page
   if (currentView === 'landing') {
     return <LandingPage onEnterApp={() => setCurrentView('home')} />;
   }
@@ -406,28 +494,65 @@ export default function App() {
         {/* Top Search & Actions Bar */}
         <TopBar
           searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
+          setSearchQuery={(val) => {
+            setSearchQuery(val);
+            if (val.trim() && currentView !== 'inbox') {
+              setCurrentView('inbox');
+            }
+          }}
+          onSearchSubmit={() => setCurrentView('inbox')}
+          onNotificationsClick={() => setCurrentView('actions')}
           onRefresh={handleRefresh}
           isRefreshing={isRefreshing}
           onProcessAll={handleProcessAll}
           isProcessingAll={isProcessingAll}
-          onOpenIngest={() => setIsIngestModalOpen(true)}
+          onOpenIngest={() => {
+            setIngestInitialTab('paste');
+            setOauthBanner(null);
+            setIsIngestModalOpen(true);
+          }}
           unreadCount={stats.unread}
         />
 
         {/* Content View Container */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto pb-24 md:pb-12">
           
-          {/* Loading State */}
           {loading && (
-            <div className="py-24 text-center text-ink-muted flex flex-col items-center justify-center space-y-3">
-              <RefreshCw className="w-8 h-8 animate-spin text-forest" />
-              <p className="font-serif text-lg text-ink">Preparing your collegiate briefing...</p>
-              <p className="text-xs text-ink-muted">Synchronizing emails, deadlines & AI intelligence</p>
+            <div className="space-y-8 animate-pulse" aria-label="Loading Campus Cue">
+              <div className="space-y-2">
+                <div className="h-9 w-64 bg-cream-border/60 rounded-xl" />
+                <div className="h-4 w-44 bg-cream-border/40 rounded-lg" />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 lg:gap-6">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="editorial-card p-5 h-32 flex flex-col justify-between">
+                    <div className="h-8 w-8 rounded-lg bg-cream-border/60" />
+                    <div className="space-y-2">
+                      <div className="h-7 w-12 bg-cream-border/60 rounded-md" />
+                      <div className="h-3 w-28 bg-cream-border/40 rounded" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-7 editorial-card p-6 h-64 space-y-4">
+                  <div className="h-5 w-32 bg-cream-border/60 rounded" />
+                  <div className="h-6 w-3/4 bg-cream-border/50 rounded" />
+                  <div className="h-4 w-full bg-cream-border/40 rounded" />
+                  <div className="h-4 w-5/6 bg-cream-border/40 rounded" />
+                </div>
+                <div className="lg:col-span-5 editorial-card p-6 h-64 space-y-4">
+                  <div className="h-5 w-40 bg-cream-border/60 rounded" />
+                  {[1, 2, 3].map((row) => (
+                    <div key={row} className="h-10 bg-cream-border/40 rounded-xl" />
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Error State */}
           {!loading && error && (
             <div className="editorial-card p-5 border-red-200 bg-[#FDF2F2] text-red-800 flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
@@ -446,7 +571,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Active Screen View */}
           {!loading && !error && (
             <>
               {currentView === 'home' && (
@@ -454,11 +578,15 @@ export default function App() {
                   emails={emails}
                   digest={digest}
                   stats={stats}
+                  dataMode={dataMode}
+                  connectedAccountsCount={healthStatus?.connectedAccountsCount || 0}
                   onSelectEmail={handleSelectEmail}
                   onNavigate={(view) => setCurrentView(view)}
                   onRegenerateDigest={handleRegenerateDigest}
                   isRegeneratingDigest={isRegeneratingDigest}
                   onSelectEmailById={handleSelectEmailById}
+                  onOpenConnectInbox={handleOpenConnectInbox}
+                  onClearDemo={handleClearDemo}
                 />
               )}
 
@@ -476,16 +604,23 @@ export default function App() {
                   emails={emails}
                   onSelectEmail={handleSelectEmail}
                   onToggleRead={handleToggleRead}
-                  onUpdateCategory={handleUpdateCategory}
-                  onOpenIngest={() => setIsIngestModalOpen(true)}
+                  onArchive={handleArchiveEmail}
+                  onDelete={handleDeleteEmail}
+                  showArchived={showArchived}
+                  onToggleShowArchived={() => setShowArchived(prev => !prev)}
+                  onOpenIngest={handleOpenConnectInbox}
                   isProcessing={isProcessingAll}
+                  globalSearchQuery={searchQuery}
+                  setGlobalSearchQuery={setSearchQuery}
                 />
               )}
 
               {currentView === 'deadlines' && (
                 <DeadlinesView
                   emails={emails}
+                  reminders={reminders}
                   onSelectEmail={handleSelectEmail}
+                  onToggleDeadlineDone={handleToggleDeadlineDone}
                 />
               )}
 
@@ -503,7 +638,8 @@ export default function App() {
                   email={selectedEmail}
                   onBack={() => setCurrentView('inbox')}
                   onToggleRead={handleToggleRead}
-                  onUpdateCategory={handleUpdateCategory}
+                  onArchive={handleArchiveEmail}
+                  onDelete={handleDeleteEmail}
                   onOverride={handleOverrideEmail}
                   onReprocess={handleReprocessEmail}
                   isProcessingSingle={isProcessingSingle}
@@ -528,14 +664,21 @@ export default function App() {
 
       {/* Global Modals */}
       <FirstRunModal />
-      <SettingsModal onResetDemo={handleResetDemo} />
+      <SettingsModal
+        onResetDemo={handleResetDemo}
+        onClearDemo={handleClearDemo}
+        healthStatus={healthStatus}
+        onHealthUpdated={() => fetchData(showArchived)}
+      />
       <IngestModal
         isOpen={isIngestModalOpen}
         onClose={() => setIsIngestModalOpen(false)}
         onIngestEmail={handleIngestEmail}
         isIngesting={isIngesting}
         onEmlUploaded={handleEmlUploaded}
-        onGmailSynced={handleGmailSynced}
+        onGmailSynced={handleInboxSynced}
+        initialTab={ingestInitialTab}
+        oauthBanner={oauthBanner}
       />
 
     </div>

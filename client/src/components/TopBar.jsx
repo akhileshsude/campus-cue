@@ -5,6 +5,8 @@ import { useUser } from '../context/UserContext';
 export default function TopBar({ 
   searchQuery, 
   setSearchQuery, 
+  onSearchSubmit,
+  onNotificationsClick,
   onRefresh, 
   isRefreshing,
   onProcessAll,
@@ -16,7 +18,13 @@ export default function TopBar({
   return (
     <header className="sticky top-0 z-20 bg-cream/95 backdrop-blur-xs border-b border-cream-border px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4">
       {/* Search Input */}
-      <div className="flex-1 max-w-xl">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (onSearchSubmit) onSearchSubmit(searchQuery);
+        }}
+        className="flex-1 max-w-xl"
+      >
         <div className="relative">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
           <input
@@ -27,7 +35,7 @@ export default function TopBar({
             className="w-full pl-10 pr-4 py-2 text-sm bg-cream-card border border-cream-border rounded-xl text-ink placeholder:text-ink-muted/70 focus:outline-none focus:border-forest focus:ring-1 focus:ring-forest transition-all"
           />
         </div>
-      </div>
+      </form>
 
       {/* Right Controls */}
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
@@ -68,7 +76,8 @@ export default function TopBar({
         {/* Notification Bell */}
         <div className="relative">
           <button 
-            title="Notifications"
+            onClick={onNotificationsClick}
+            title="View pending reminders & follow-ups"
             className="p-2 rounded-xl border border-cream-border bg-cream-card hover:bg-cream transition-colors text-ink-muted hover:text-ink"
           >
             <Bell className="w-4 h-4" />

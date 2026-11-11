@@ -18,9 +18,13 @@ import {
   X,
   AlertCircle,
   Calendar,
-  Check
+  Check,
+  Mail,
+  MailOpen,
+  Download
 } from 'lucide-react';
 import { useUser } from '../context/UserContext';
+import { apiFetch, apiUrl } from '../utils/api';
 
 const VALID_CATEGORIES = ['Academics', 'Placements', 'Clubs', 'Events', 'Announcements'];
 const VALID_PRIORITIES = ['High', 'Medium', 'Low'];
@@ -29,6 +33,8 @@ export default function EmailDetailView({
   email, 
   onBack, 
   onToggleRead,
+  onArchive,
+  onDelete,
   onOverride,
   onReprocess,
   isProcessingSingle = false,
@@ -49,8 +55,14 @@ export default function EmailDetailView({
 
   // View original email modal state
   const [isRawModalOpen, setIsRawModalOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!email) return null;
+
+  const extractSenderAddress = (rawSender = '') => {
+    const m = String(rawSender).match(/<([^>]+)>/);
+    return m ? m[1] : String(rawSender).trim();
+  };
 
   const effectiveCategory = email.user_category || email.category || 'Announcements';
   const effectivePriority = email.user_priority || email.priority || 'Medium';
@@ -114,7 +126,7 @@ export default function EmailDetailView({
   const handleDraftReply = async () => {
     setIsDraftingReply(true);
     try {
-      const res = await fetch('/api/emails/reply', {
+      const res = await apiFetch('/api/emails/reply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -177,24 +189,44 @@ export default function EmailDetailView({
           </button>
 
           <div className="flex items-center gap-1 text-ink-muted pl-2 border-l border-cream-border">
-            <button 
-              title="Archive"
+            <button
+              onClick={() => onToggleRead && onToggleRead(email.id, !email.is_read)}
+              title={email.is_read ? 'Mark as unread' : 'Mark as read'}
               className="p-2 rounded-xl hover:bg-cream-card transition-colors hover:text-ink"
+            >
+              {email.is_read ? <Mail className="w-4 h-4" /> : <MailOpen className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={() => onArchive && onArchive(email.id, !email.is_archived)}
+              title={email.is_archived ? 'Restore to Inbox' : 'Archive email'}
+              className={`p-2 rounded-xl hover:bg-cream-card transition-colors ${email.is_archived ? 'text-forest bg-cream-card' : 'hover:text-ink'}`}
             >
               <Archive className="w-4 h-4" />
             </button>
-            <button 
-              title="Delete"
-              className="p-2 rounded-xl hover:bg-cream-card transition-colors hover:text-ink"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-            <button 
-              title="More actions"
-              className="p-2 rounded-xl hover:bg-cream-card transition-colors hover:text-ink"
-            >
-              <MoreHorizontal className="w-4 h-4" />
-            </button>
+            {confirmDelete ? (
+              <div className="flex items-center gap-1 bg-red-50 border border-red-200 rounded-xl px-2 py-1">
+                <button
+                  onClick={() => onDelete && onDelete(email.id)}
+                  className="text-[11px] font-bold text-red-700 hover:underline px-1"
+                >
+                  Delete?
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="text-[11px] text-ink-muted hover:text-ink px-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                title="Delete email"
+                className="p-2 rounded-xl hover:bg-red-50 hover:text-red-700 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -418,7 +450,14 @@ export default function EmailDetailView({
                 {generatedDraft.draftBody}
               </div>
 
-              <div className="flex justify-end">
+              <div className="flex items-center justify-end gap-4">
+                <a
+                  href={`mailto:${encodeURIComponent(extractSenderAddress(email.sender))}?subject=${encodeURIComponent(generatedDraft.draftSubject || `Re: ${email.subject}`)}&body=${encodeURIComponent(generatedDraft.draftBody || '')}`}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink hover:text-forest transition-colors"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Open in Email App</span>
+                </a>
                 <button
                   onClick={handleCopyDraft}
                   className="inline-flex items-center gap-1 text-xs font-semibold text-forest hover:underline"
@@ -446,17 +485,27 @@ export default function EmailDetailView({
                     {attName}
                   </p>
                   <p className="text-[11px] text-ink-muted">
-                    Collegiate file attachment
+                    {email.has_saved_attachments
+                      ? 'Email attachment ready to download'
+                      : 'Attachment metadata recorded'}
                   </p>
                 </div>
               </div>
 
-              <button 
-                onClick={() => alert(`Accessing attachment: ${attName}`)}
-                className="text-xs font-semibold text-forest hover:underline px-3 py-1.5 rounded-lg hover:bg-cream transition-colors"
-              >
-                Download
-              </button>
+              {email.has_saved_attachments ? (
+                <a
+                  href={apiUrl(`/api/emails/${email.id}/attachments/${encodeURIComponent(attName)}`)}
+                  download={attName}
+                  className="text-xs font-semibold text-forest hover:underline px-3 py-1.5 rounded-lg hover:bg-cream transition-colors inline-flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download</span>
+                </a>
+              ) : (
+                <span className="text-[11px] font-medium text-ink-muted px-3 py-1.5">
+                  Filename only
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -599,7 +648,7 @@ export default function EmailDetailView({
             <div className="flex-1 overflow-y-auto py-4 space-y-4 text-xs font-mono">
               <div className="p-3 bg-cream-card rounded-xl border border-cream-border space-y-1">
                 <p><strong>From:</strong> {email.sender}</p>
-                <p><strong>To:</strong> student@university.edu</p>
+                <p><strong>To:</strong> {email.recipient || user.email || 'me'}</p>
                 <p><strong>Date:</strong> {new Date(email.received_at).toUTCString()}</p>
                 <p><strong>Subject:</strong> {email.subject}</p>
               </div>

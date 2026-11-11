@@ -10,7 +10,9 @@
     "test:ai": "node scripts/testProcessor.js",
     "test:digest": "node scripts/testDigest.js",
     "test:eml": "node scripts/testEmlParser.js",
-    "test:college": "node tests/runCollegeTests.js"
+    "test:college": "node tests/runCollegeTests.js",
+    "test:endpoints": "node scripts/testEndpoints.js",
+    "test:http": "node scripts/testHttpRoutes.js"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",
@@ -19,6 +21,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "googleapis": "^189.0.0",
+    "imapflow": "^2.11.0",
     "mailparser": "^3.14.3",
     "multer": "^2.5.0"
   }

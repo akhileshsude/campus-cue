@@ -14,19 +14,27 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS emails (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL DEFAULT 'default_student',
-    source VARCHAR(20) NOT NULL DEFAULT 'paste' CHECK (source IN ('paste', 'eml', 'gmail', 'sample')),
-    external_id TEXT, -- e.g. Gmail message ID
+    source VARCHAR(20) NOT NULL DEFAULT 'paste' CHECK (source IN ('paste', 'eml', 'gmail', 'outlook', 'microsoft', 'imap', 'webhook', 'sample')),
+    external_id TEXT, -- e.g. Gmail message ID or IMAP Message-ID
     content_hash VARCHAR(64) NOT NULL, -- SHA-256 hash of sender + subject + body
+    recipient VARCHAR(255), -- Target email ID that received this email
     sender VARCHAR(255) NOT NULL,
     sender_name VARCHAR(255),
     subject VARCHAR(500) NOT NULL,
     body TEXT NOT NULL,
     attachments JSONB DEFAULT '[]'::jsonb, -- list of attachment filenames
     is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_emails_user_content UNIQUE (user_id, content_hash)
 );
+
+-- Idempotent column & constraint migrations for previously initialized databases
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS recipient VARCHAR(255);
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE emails DROP CONSTRAINT IF EXISTS emails_source_check;
+ALTER TABLE emails ADD CONSTRAINT emails_source_check CHECK (source IN ('paste', 'eml', 'gmail', 'outlook', 'microsoft', 'imap', 'webhook', 'sample'));
 
 -- ============================================================================
 -- 2. Email Analysis Table
@@ -43,6 +51,7 @@ CREATE TABLE IF NOT EXISTS email_analysis (
     priority_reason TEXT,
     deadline TIMESTAMPTZ,
     user_deadline TIMESTAMPTZ,
+    deadline_completed BOOLEAN NOT NULL DEFAULT FALSE,
     deadline_confidence VARCHAR(20) DEFAULT 'confirmed' CHECK (deadline_confidence IN ('confirmed', 'uncertain')),
     required_action TEXT,
     needs_reply BOOLEAN NOT NULL DEFAULT FALSE,
@@ -54,6 +63,8 @@ CREATE TABLE IF NOT EXISTS email_analysis (
     processed_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT uq_email_analysis_email UNIQUE (email_id)
 );
+
+ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS deadline_completed BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ============================================================================
 -- 3. Reminders Table
@@ -107,12 +118,14 @@ SELECT
     e.source,
     e.external_id,
     e.content_hash,
+    e.recipient,
     e.sender,
     e.sender_name,
     e.subject,
     e.body,
     e.attachments,
     e.is_read,
+    e.is_archived,
     e.received_at,
     e.created_at,
     COALESCE(a.user_category, a.category, 'Announcements') AS effective_category,
@@ -125,6 +138,7 @@ SELECT
     COALESCE(a.user_deadline, a.deadline) AS effective_deadline,
     a.deadline AS ai_deadline,
     a.user_deadline,
+    a.deadline_completed,
     a.deadline_confidence,
     a.summary,
     a.required_action,

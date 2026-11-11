@@ -3,15 +3,25 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const API_KEY = process.env.GEMINI_API_KEY || process.env.AI_API_KEY;
-
 let aiClient = null;
-if (API_KEY && !API_KEY.includes('your_gemini')) {
-  try {
-    aiClient = new GoogleGenAI({ apiKey: API_KEY });
-  } catch (err) {
-    console.warn('⚠️ [digestGenerator] Could not initialize GoogleGenAI:', err.message);
+
+function initDigestAiClient(key) {
+  const cleanKey = (key || '').trim();
+  if (cleanKey && !cleanKey.includes('your_gemini')) {
+    try {
+      return new GoogleGenAI({ apiKey: cleanKey });
+    } catch (err) {
+      console.warn('⚠️ [digestGenerator] Could not initialize GoogleGenAI:', err.message);
+    }
   }
+  return null;
+}
+
+aiClient = initDigestAiClient(process.env.GEMINI_API_KEY || process.env.AI_API_KEY);
+
+export function reloadDigestAiClient(newKey) {
+  aiClient = initDigestAiClient(newKey);
+  return Boolean(aiClient);
 }
 
 /**

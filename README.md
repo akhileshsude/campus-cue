@@ -25,9 +25,9 @@ campus-cue/
 │   │   │   ├── InboxView.jsx       # Category tabs, priority pills, sender initials, search
 │   │   │   ├── DeadlinesView.jsx   # Timeline view (Upcoming, Overdue, Completed) + .ics Export
 │   │   │   ├── EmailDetailView.jsx # Original email + AI summary + Student overrides + Smart Reply Drafter
-│   │   │   ├── IngestModal.jsx     # Phase 4: Paste Email, .eml upload, Gmail OAuth sync
+│   │   │   ├── IngestModal.jsx     # 1-Box Quick Paste, .eml/.mbox drop, Extension & IMAP/OAuth sync
 │   │   │   ├── FirstRunModal.jsx   # First-run onboarding ("What should we call you?")
-│   │   │   ├── SettingsModal.jsx   # Edit name, email, avatar image URL, Reset Demo data
+│   │   │   ├── SettingsModal.jsx   # Edit profile, inline Gemini API key, Clear Samples & Reset Demo
 │   │   │   ├── MobileBottomNav.jsx # Bottom navigation bar for mobile sketch layout
 │   │   │   └── LandingPage.jsx     # Bold editorial public landing page
 │   │   ├── context/
@@ -46,17 +46,24 @@ campus-cue/
 │   │   └── sampleData.js       # Realistic university dataset with tricky edge cases
 │   ├── services/
 │   │   ├── emailProcessor.js   # Gemini structured JSON processor with retry & safe fallback
-│   │   └── digestGenerator.js  # Phase 3: Synthesizes daily academic command center digest
+│   │   ├── digestGenerator.js  # Phase 3: Synthesizes daily academic command center digest
+│   │   ├── imapService.js      # Universal IMAP sync & MX/domain provider detector (any email ID)
+│   │   ├── microsoftService.js # Microsoft / Outlook / M365 OAuth 2.0 & Graph Mail.Read sync
+│   │   ├── localPersistence.js # Persistent disk inbox store, attachments cache & AES-256-GCM vault
+│   │   └── supabaseStore.js    # Unified Supabase schema adapter (emails + email_analysis + reminders)
 │   ├── scripts/
 │   │   ├── testProcessor.js    # AI email analysis test suite (10/10 passing)
-│   │   ├── testDigest.js       # Academic digest generator test suite (100% assertions)
-│   │   └── testEmlParser.js    # .eml file mailparser test suite
+│   │   ├── testDigest.js       # Academic digest generator test suite
+│   │   ├── testEmlParser.js    # .eml file mailparser test suite
+│   │   ├── testEndpoints.js    # Safeguards, hash deduplication & provider detection checks
+│   │   └── testHttpRoutes.js   # In-process Express HTTP route integration suite (12 checks)
 │   ├── tests/
 │   │   ├── collegeEmails.js    # Realistic Indian university email dataset (6 realistic + 3 tricky)
 │   │   └── runCollegeTests.js  # Test runner with verification matrix (36/36 checks, 100% accuracy)
 │   ├── schema.sql              # Supabase PostgreSQL schema with SHA-256 deduplication & indexes
 │   └── package.json
 │
+├── extension/                  # Chrome MV3 Webmail Sync Extension (zero OAuth / zero IMAP)
 ├── .env.example                # Example environment variables template
 ├── package.json                # Root monorepo orchestrator with concurrently
 └── README.md                   # Operational & handoff documentation
@@ -104,16 +111,23 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-supabase-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 
-# Optional for Phase 4 Gmail Sync:
+# Optional for Phase 4 Gmail & Microsoft/Outlook Sync:
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_REDIRECT_URI=http://localhost:5001/api/auth/google/callback
+
+MICROSOFT_CLIENT_ID=your-azure-app-client-id
+MICROSOFT_CLIENT_SECRET=your-azure-app-client-secret
+MICROSOFT_TENANT_ID=common
+MICROSOFT_REDIRECT_URI=http://localhost:5001/api/auth/microsoft/callback
 
 # Client Deploy-Readiness (leave blank in dev)
 VITE_API_URL=
 ```
 
-> **Zero-Setup Resilience:** If no Gemini API key or Supabase credentials are provided, Campus Cue automatically runs in **smart deterministic heuristic mode**. All views, Indian college test cases, daily digest synthesis, reminders, and student overrides continue functioning 100% offline.
+> **Persistent Real Data & Zero-Setup Resilience:**
+> - Even without Supabase credentials, Campus Cue automatically persists your real synced emails, edits, reminders, digests, attachments, and AES-256-GCM encrypted session credentials locally in gitignored `server/data/`.
+> - Connecting any real inbox automatically replaces showcase sample items with your real email correspondence. If `GEMINI_API_KEY` is blank, Campus Cue uses deterministic offline heuristics; you can paste a Gemini key directly inside **Settings > Gemini AI Key** (saved locally to `server/.env`) to activate live extraction immediately without restarting.
 
 ### 4. Run Both Frontend and Backend
 Launch both services concurrently with a single command:
@@ -130,26 +144,21 @@ npm run dev
 
 ## 🧪 Comprehensive Verification & Test Suites
 
-Campus Cue includes five automated test suites covering every layer of the system:
+Campus Cue includes automated test suites covering every layer of the system:
 
 ```bash
-# 1. Realistic Indian College Emails Test Suite (Step 12 - 36/36 checks passed, 100% accuracy)
-npm run test:college
+# Run every test suite across server & client at once:
+npm run test:all
 
-# 2. General AI Processor Test Suite (Phase 2 - 10/10 passed)
-npm run test:ai
-
-# 3. Daily Academic Command Center Digest Test Suite (Step 8 - 100% assertions)
-npm run test:digest
-
-# 4. User Personalization, Initials & Greeting Flow (Step 7 - 100% passed)
-npm run test:user
-
-# 5. .EML Mailparser & Attachment Test
-npm --prefix server run test:eml
-
-# 6. Production Frontend Build
-npm run build
+# Or run individual suites:
+npm run test:college    # Realistic Indian College Emails (36/36 checks, 100% accuracy)
+npm run test:ai         # AI Email Processor Suite (10/10 emails)
+npm run test:digest     # Academic Command Center Digest Suite
+npm run test:eml        # .EML Mailparser & Attachment Test
+npm run test:endpoints  # SHA-256 Deduplication, Date Safeguards & Provider Detection
+npm run test:http       # 12 Express HTTP Route Integration Tests
+npm run test:user       # UserContext Initials & Time-Based Greeting Flow
+npm run build           # Production Frontend Build
 ```
 
 ---
@@ -204,19 +213,21 @@ Campus Cue is backed by a Supabase PostgreSQL schema defined in `server/schema.s
 
 ---
 
-## 📬 Email Ingestion Flow (Step 10)
+## 📬 Email Ingestion Flow — Works With ANY Email ID (Step 10+)
 
-1. **Manual Email Paste**:
-   - Click **"+ Add Email"** in the top navigation or inbox view.
-   - Paste subject, sender, date, and body, or select from built-in student templates.
-2. **Drag-and-Drop .eml File Upload**:
-   - Drop `.eml` files exported from Outlook, Apple Mail, Thunderbird, or Gmail.
-   - Parsed on backend using `mailparser` with zero binary storage overhead.
-3. **Live Gmail OAuth Sync (Optional)**:
-   - Setup Google Cloud Console OAuth Client ID with redirect URI `http://localhost:5001/api/auth/google/callback`.
-   - Scope: `https://www.googleapis.com/auth/gmail.readonly`.
-   - Connect account in **Ingest Modal > Gmail Sync** to import your latest inbox messages.
-   - *Institutional Notice*: If your university Google Workspace blocks third-party OAuth (`access_denied` / Error 403), Campus Cue handles this gracefully with an informational notice while continuing full operations via `.eml` upload and paste.
+1. **⚡ 1-Box Quick Paste & Drag-and-Drop `.eml` / `.mbox` (Zero setup, works everywhere)**:
+   - In **+ Ingest > 1. Paste Email**, copy any email in Gmail, Outlook Web, or Apple Mail (`Cmd+A` → `Cmd+C`) and click **Paste from Clipboard** — `parseRawEmailText` automatically extracts sender, subject, date, and body.
+   - Or open **2. .eml / .mbox** to drop exported `.eml` or `.mbox` files directly (even straight from macOS Apple Mail). Saved attachments download directly from the email detail view.
+2. **⚡ 1-Click Chrome Extension (Zero OAuth / Zero IMAP — ideal when College IT blocks third-party apps)**:
+   - Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select `extension/`.
+   - Open your college Gmail, Outlook, Roundcube, or Zimbra tab, click the **clg.inbox** icon, and click **⚡ 1-Click Sync Open Webmail Tab**.
+3. **Personal / Unlocked Account IMAP Sync & Forwarding Relay**:
+   - Open **+ Ingest > 3. Connect Inbox > Personal / Unlocked Account**.
+   - Enter any email ID (including a personal Gmail receiving auto-forwarded college mail); Campus Cue detects IMAP/MX settings automatically (`imap.gmail.com`, `outlook.office365.com`, `imap.mail.me.com`, `imap.mail.yahoo.com`, `imappro.zoho.com`, or custom `mail.<university.edu>`) and encrypts credentials locally with AES-256-GCM (`server/data/vault.json`).
+4. **Developer / Advanced Connections (Optional OAuth 2.0, Apps Script & Webhook)**:
+   - **Google / Gmail OAuth**: Configure `GOOGLE_CLIENT_ID` & `GOOGLE_CLIENT_SECRET` with callback `http://localhost:5001/api/auth/google/callback` and `gmail.readonly` scope.
+   - **Microsoft / Outlook / College M365 OAuth**: Register Azure App with callback `http://localhost:5001/api/auth/microsoft/callback` and delegated `User.Read`, `Mail.Read`, `offline_access`.
+   - **Inbound Webhook (`POST /api/emails/inbound` & `/api/emails/inbound-batch`)**: Accepts JSON payloads (`{ from, to, subject, text, date, is_read }`), optionally secured via `INBOUND_WEBHOOK_SECRET`.
 
 ---
 
@@ -224,7 +235,7 @@ Campus Cue is backed by a Supabase PostgreSQL schema defined in `server/schema.s
 
 ### Demo Reset:
 To restore the sample emails, reminders, and daily digest to their initial showcase state:
-- Open **Settings** (gear icon in sidebar) > click **"Reset Demo Data"**.
+- Open **Settings** (gear icon in sidebar) > click **"Reset Demo"** (or **"Clear Samples"** to start an empty live inbox).
 - Or send an API request:
   ```bash
   curl -X POST http://localhost:5001/api/reset-demo

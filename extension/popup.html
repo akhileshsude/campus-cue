@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>clg.inbox Webmail Sync</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="brand">
+        <span class="logo-dot"></span>
+        <h1>clg.inbox</h1>
+      </div>
+      <span class="pill">Zero OAuth / No IMAP</span>
+    </header>
+
+    <p class="subtitle">
+      Open your college Gmail, Outlook, or webmail tab and click once below to import visible emails directly into Campus Cue.
+    </p>
+
+    <div class="field-group">
+      <label for="userEmail">Your Email ID (auto-detected if possible)</label>
+      <input id="userEmail" type="email" placeholder="rollno@college.edu" />
+    </div>
+
+    <div class="field-group">
+      <label for="apiBase">Campus Cue Server URL</label>
+      <input id="apiBase" type="url" value="http://localhost:5001" />
+    </div>
+
+    <div class="actions">
+      <button id="quickSyncBtn" class="btn-primary">⚡ 1-Click Sync Open Webmail Tab</button>
+      <div style="display: flex; gap: 6px;">
+        <button id="scanBtn" class="btn-secondary">Preview Only</button>
+        <button id="openAppBtn" class="btn-secondary">Open clg.inbox</button>
+      </div>
+      <button id="importBtn" class="btn-secondary hidden">Import Previewed Emails</button>
+    </div>
+
+    <div id="previewBox" class="preview-box hidden"></div>
+    <div id="statusBox" class="status-box hidden"></div>
+
+    <footer class="footer">
+      Reads only your active open tab when clicked.
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

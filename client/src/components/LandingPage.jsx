@@ -108,31 +108,60 @@ export default function LandingPage({ onEnterApp }) {
             </div>
           </div>
 
-          {/* Right Hero Visual / Sepia Image Slot */}
+          {/* Right Hero Visual: Live Collegiate Intelligence Preview */}
           <div className="lg:col-span-5">
-            <div className="relative rounded-2xl overflow-hidden border border-cream-border bg-gradient-to-br from-[#EAE2D2] via-[#E2D8C3] to-[#D5C9B0] p-6 sm:p-8 aspect-4/3 flex flex-col justify-between shadow-card">
-              {/* Subtle architectural grain placeholder */}
-              <div className="absolute inset-0 opacity-15 pointer-events-none mix-blend-multiply bg-[radial-gradient(#1F3A2E_1px,transparent_1px)] [background-size:16px_16px]" />
-              
-              <div className="flex items-center justify-between text-xs font-serif italic text-sage">
-                <span>NST Campus & Collegiate Archive</span>
-                <span>Vol. 2026</span>
+            <div className="relative rounded-2xl overflow-hidden border border-cream-border bg-gradient-to-br from-[#F4EFE4] via-[#EAE2D2] to-[#E1D7C2] p-5 sm:p-6 flex flex-col justify-between shadow-card space-y-4">
+              <div className="flex items-center justify-between text-xs font-serif italic text-sage border-b border-forest/10 pb-2.5">
+                <span>Daily Academic Command Edition</span>
+                <span className="inline-flex items-center gap-1 not-italic font-sans font-bold text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-forest text-gold">
+                  <Sparkles className="w-3 h-3" />
+                  <span>Briefing</span>
+                </span>
               </div>
 
-              {/* Central 3D Ribbon / Geometric Art Placeholder */}
-              <div className="my-auto text-center space-y-2 py-8 relative">
-                <div className="w-20 h-20 mx-auto rounded-full bg-forest/10 border border-forest/20 flex items-center justify-center text-forest">
-                  <Mail className="w-10 h-10 text-forest/70" />
+              <div className="space-y-2.5 text-left">
+                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-2xs space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-red-100 text-red-800">
+                      High Priority &middot; Exam
+                    </span>
+                    <span className="text-[10px] font-mono text-ink-muted">10:00 AM</span>
+                  </div>
+                  <p className="text-xs font-bold text-ink">
+                    OS Midterm Room Relocation &rarr; Faraday 402
+                  </p>
+                  <p className="text-[11px] text-ink-muted leading-snug">
+                    Carry ID card by 9:45 AM. Verified date extracted automatically.
+                  </p>
                 </div>
-                <p className="text-xs uppercase tracking-widest font-bold text-forest/80 pt-2">
-                  [ Hero Visual Panel ]
-                </p>
-                <p className="text-[11px] text-ink-muted max-w-xs mx-auto">
-                  Architectural campus view & metallic intelligence ribbon slot
-                </p>
+
+                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-2xs space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-forest/10 text-forest">
+                      Placement Action
+                    </span>
+                    <span className="text-[10px] font-semibold text-forest flex items-center gap-1">
+                      <CalendarClock className="w-3 h-3" /> Tomorrow 6 PM
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold text-ink">
+                    Confirm Technical Interview Slot
+                  </p>
+                  <p className="text-[11px] text-ink-muted leading-snug">
+                    Added to Actions queue &amp; exportable to Calendar (.ics).
+                  </p>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-forest text-[#F1EBDD] flex items-center justify-between text-[11px]">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-gold shrink-0" />
+                    <span>Works with any college inbox, even without OAuth</span>
+                  </span>
+                  <Mail className="w-3.5 h-3.5 text-gold shrink-0" />
+                </div>
               </div>
 
-              <div className="text-[11px] text-ink-muted border-t border-forest/10 pt-3 flex items-center justify-between">
+              <div className="text-[11px] text-ink-muted border-t border-forest/10 pt-2.5 flex items-center justify-between">
                 <span>Designed for academic precision</span>
                 <span className="font-bold text-forest">clg.inbox</span>
               </div>
