@@ -22,6 +22,7 @@ export default function InboxView({
   onToggleRead,
   onArchive,
   onDelete,
+  onReprocess,
   showArchived = false,
   onToggleShowArchived,
   onOpenIngest,
@@ -257,11 +258,18 @@ export default function InboxView({
             const timeText = formatRowTime(email.received_at);
             const hasUserOverride = Boolean(email.user_category || email.user_priority || email.user_deadline || email.edited_by_user);
 
+            const isFailed = email.status === 'failed';
+            const isBasicAnalysis =
+              !isFailed &&
+              email.source !== 'sample' &&
+              email.analysis_source &&
+              email.analysis_source !== 'gemini';
+
             return (
               <div
                 key={email.id}
                 onClick={() => onSelectEmail && onSelectEmail(email)}
-                className={`group p-4 sm:p-4.5 flex items-center justify-between gap-3 sm:gap-4 cursor-pointer hover:bg-cream/60 transition-colors ${
+                className={`group p-4 flex items-center justify-between gap-3 sm:gap-4 cursor-pointer hover:bg-cream/60 transition-colors ${
                   !email.is_read ? 'bg-cream-card font-semibold' : 'bg-cream-card/60'
                 }`}
               >
@@ -278,13 +286,26 @@ export default function InboxView({
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
+                    <div className="flex flex-wrap items-baseline gap-2">
                       <span className={`text-xs sm:text-sm truncate ${!email.is_read ? 'font-bold text-ink' : 'font-medium text-ink'}`}>
                         {email.senderName || email.sender.split('<')[0]}
                       </span>
                       {hasUserOverride && (
-                        <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.2 rounded-full border border-sage/40 shrink-0">
+                        <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.5 rounded-full border border-sage/40 shrink-0">
                           Edited by you
+                        </span>
+                      )}
+                      {isFailed && (
+                        <span className="bg-red-100 text-red-800 text-[9px] font-bold px-1.5 py-0.5 rounded-full border border-red-200 shrink-0">
+                          AI Failed
+                        </span>
+                      )}
+                      {isBasicAnalysis && (
+                        <span
+                          title={email.error || 'Gemini offline — heuristic classification only'}
+                          className="bg-amber-100 text-amber-900 text-[9px] font-bold px-1.5 py-0.5 rounded-full border border-amber-200 shrink-0"
+                        >
+                          Basic analysis (AI offline)
                         </span>
                       )}
                     </div>
@@ -299,6 +320,25 @@ export default function InboxView({
 
                 {/* Right: Badges, Quick Actions & Timestamp */}
                 <div className="flex items-center gap-2 shrink-0">
+                  {onReprocess && (isFailed || isBasicAnalysis) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReprocess(email.id);
+                      }}
+                      title={isFailed ? 'Retry AI analysis' : 'Reprocess with AI'}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors ${
+                        isFailed
+                          ? 'bg-red-50 hover:bg-red-100 text-red-800 border-red-200'
+                          : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200'
+                      }`}
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>{isFailed ? 'Retry' : 'Reprocess with AI'}</span>
+                    </button>
+                  )}
+
                   <div className="hidden group-hover:flex items-center gap-1 mr-1">
                     {onToggleRead && (
                       <button

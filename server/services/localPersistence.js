@@ -53,7 +53,31 @@ function decryptPayload(tokenStr) {
   return JSON.parse(decrypted.toString('utf8'));
 }
 
+export function encryptString(plaintext) {
+  if (!plaintext) return plaintext || null;
+  if (String(plaintext).startsWith('enc:v1:')) return plaintext;
+  return `enc:v1:${encryptPayload({ v: String(plaintext) })}`;
+}
+
+export function decryptString(ciphertext) {
+  if (!ciphertext) return null;
+  const raw = String(ciphertext);
+  if (!raw.startsWith('enc:v1:')) return raw;
+  const parsed = decryptPayload(raw.slice('enc:v1:'.length));
+  return parsed?.v ?? null;
+}
+
 export function loadPersistedStore(defaultState) {
+  if (process.env.DISABLE_LOCAL_PERSIST === 'true') {
+    return {
+      mode: 'demo',
+      emails: JSON.parse(JSON.stringify(defaultState.emails || [])),
+      reminders: JSON.parse(JSON.stringify(defaultState.reminders || [])),
+      digest: defaultState.digest ? JSON.parse(JSON.stringify(defaultState.digest)) : null,
+      accounts: [],
+      existsOnDisk: false,
+    };
+  }
   try {
     if (!fs.existsSync(STORE_PATH)) {
       return {
@@ -115,6 +139,7 @@ export function savePersistedStore(state) {
 
 export function loadEncryptedSecretsMap() {
   const result = new Map();
+  if (process.env.DISABLE_LOCAL_PERSIST === 'true') return result;
   try {
     if (!fs.existsSync(VAULT_PATH)) return result;
     const raw = JSON.parse(fs.readFileSync(VAULT_PATH, 'utf8'));

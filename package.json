@@ -13,6 +13,7 @@
     "test:endpoints": "npm --prefix server run test:endpoints",
     "test:http": "npm --prefix server run test:http",
     "test:user": "npm --prefix client run test:user",
+    "db:check": "npm --prefix server run db:check",
     "test:all": "npm run test:college && npm run test:ai && npm run test:digest && npm run test:eml && npm run test:endpoints && npm run test:http && npm run test:user",
     "install:all": "npm install && npm --prefix server install && npm --prefix client install",
     "build": "npm --prefix client run build"

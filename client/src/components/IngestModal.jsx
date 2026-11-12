@@ -344,7 +344,7 @@ export default function IngestModal({
     }
   };
 
-  const handlePasteSubmit = (e) => {
+  const handlePasteSubmit = async (e) => {
     e.preventDefault();
     if (pasteMode === 'smart' && rawPasteText.trim() && (!subject.trim() || !body.trim())) {
       const parsed = parseRawEmailText(rawPasteText);
@@ -365,13 +365,20 @@ export default function IngestModal({
       return;
     }
     setPasteError(null);
-    onIngestEmail({
-      sender: sender.trim() || 'University Administration <admin@university.edu>',
-      recipient: user?.email || undefined,
-      subject: effectiveSubject,
-      body: effectiveBody,
-      received_at: receivedDate ? new Date(receivedDate).toISOString() : new Date().toISOString(),
-    });
+    try {
+      const result = await onIngestEmail({
+        sender: sender.trim() || 'University Administration <admin@university.edu>',
+        recipient: user?.email || undefined,
+        subject: effectiveSubject,
+        body: effectiveBody,
+        received_at: receivedDate ? new Date(receivedDate).toISOString() : new Date().toISOString(),
+      });
+      if (result && result.ok === false) {
+        setPasteError(result.error || 'Could not process email. Please try again.');
+      }
+    } catch (err) {
+      setPasteError(err.message || 'Could not process email. Please try again.');
+    }
   };
 
   const handleFileDrop = (e) => {

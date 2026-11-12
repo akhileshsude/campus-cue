@@ -12,11 +12,12 @@ export default function TopBar({
   onProcessAll,
   isProcessingAll,
   onOpenIngest,
-  unreadCount = 0
+  unreadCount = 0,
+  remindersCount = 0,
 }) {
   const { user, initials, openSettings } = useUser();
   return (
-    <header className="sticky top-0 z-20 bg-cream/95 backdrop-blur-xs border-b border-cream-border px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4">
+    <header className="sticky top-0 z-20 bg-cream/95 backdrop-blur-sm border-b border-cream-border px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4">
       {/* Search Input */}
       <form
         onSubmit={(e) => {
@@ -44,10 +45,11 @@ export default function TopBar({
           <button
             onClick={onOpenIngest}
             title="Ingest raw email & run AI pipeline"
-            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-forest bg-cream-card hover:bg-cream border border-cream-border rounded-xl transition-all shadow-xs"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 text-xs font-semibold text-forest bg-cream-card hover:bg-cream border border-cream-border rounded-xl transition-all shadow-sm"
           >
             <MailPlus className="w-3.5 h-3.5 text-forest" />
-            <span>+ Ingest</span>
+            <span className="hidden sm:inline">+ Ingest</span>
+            <span className="sm:hidden">Add</span>
           </button>
         )}
 
@@ -57,10 +59,11 @@ export default function TopBar({
             onClick={onProcessAll}
             disabled={isProcessingAll}
             title="Analyze emails with Gemini AI"
-            className="hidden sm:inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-forest hover:bg-forest-hover rounded-xl transition-all shadow-xs disabled:opacity-60"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-white bg-forest hover:bg-forest-hover rounded-xl transition-all shadow-sm disabled:opacity-60"
           >
             <Sparkles className={`w-3.5 h-3.5 text-gold ${isProcessingAll ? 'animate-spin' : ''}`} />
-            <span>{isProcessingAll ? 'Analyzing...' : 'Run AI Pipeline'}</span>
+            <span className="hidden sm:inline">{isProcessingAll ? 'Analyzing...' : 'Run AI Pipeline'}</span>
+            <span className="sm:hidden">{isProcessingAll ? '...' : 'AI'}</span>
           </button>
         )}
 
@@ -82,7 +85,7 @@ export default function TopBar({
           >
             <Bell className="w-4 h-4" />
           </button>
-          {unreadCount > 0 && (
+          {(remindersCount > 0 || unreadCount > 0) && (
             <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-600" />
           )}
         </div>

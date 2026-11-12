@@ -20,8 +20,101 @@ function initAiClient(key) {
 
 aiClient = initAiClient(process.env.GEMINI_API_KEY || process.env.AI_API_KEY);
 
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.7-flash';
+
+export function redactSecrets(text = '') {
+  return String(text || '')
+    .replace(/AIza[A-Za-z0-9_-]{10,}/g, '[REDACTED]')
+    .replace(/AQ\.[A-Za-z0-9_.-]{10,}/g, '[REDACTED]')
+    .replace(/sb_(?:secret|publishable)_[A-Za-z0-9_-]{10,}/g, '[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9_.-]{10,}/gi, 'Bearer [REDACTED]')
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}/g, '[REDACTED_JWT]');
+}
+
+let lastAiProbe = {
+  aiMode: 'offline',
+  model: GEMINI_MODEL,
+  error: aiClient ? null : 'Gemini API key is not configured.',
+  checkedAt: null,
+};
+
+export function getCachedAiHealth() {
+  return { ...lastAiProbe };
+}
+
+let activeProbePromise = null;
+
+export async function probeAiStatus() {
+  if (activeProbePromise) {
+    return activeProbePromise;
+  }
+
+  activeProbePromise = (async () => {
+    const checkedAt = new Date().toISOString();
+    if (!aiClient) {
+      lastAiProbe = {
+        aiMode: 'offline',
+        model: GEMINI_MODEL,
+        error: 'Gemini API key is not configured.',
+        checkedAt,
+      };
+      return { ...lastAiProbe };
+    }
+
+    let lastErr = null;
+    for (const modelName of [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]) {
+      try {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini health probe timed out after 20s')), 20000)
+        );
+        const callPromise = aiClient.models.generateContent({
+          model: modelName,
+          contents: 'Reply with OK',
+          config: { maxOutputTokens: 4 },
+        });
+        await Promise.race([callPromise, timeoutPromise]);
+        lastAiProbe = {
+          aiMode: 'live',
+          model: modelName,
+          error: null,
+          checkedAt: new Date().toISOString(),
+        };
+        return { ...lastAiProbe };
+      } catch (err) {
+        lastErr = redactSecrets(err?.message || 'Unknown Gemini API error');
+        const isInvalidAuth = /API_KEY_INVALID|API key not valid|401|403|PERMISSION_DENIED|INVALID_ARGUMENT/i.test(lastErr);
+        if (isInvalidAuth) break;
+      }
+    }
+
+    lastAiProbe = {
+      aiMode: 'offline',
+      model: GEMINI_MODEL,
+      error: lastErr || 'Gemini API request failed.',
+      checkedAt: new Date().toISOString(),
+    };
+    return { ...lastAiProbe };
+  })();
+
+  try {
+    return await activeProbePromise;
+  } finally {
+    activeProbePromise = null;
+  }
+}
+
 export function reloadAiClient(newKey) {
+  activeProbePromise = null;
   aiClient = initAiClient(newKey);
+  if (!aiClient) {
+    lastAiProbe = {
+      aiMode: 'offline',
+      model: GEMINI_MODEL,
+      error: 'Gemini API key is not configured.',
+      checkedAt: new Date().toISOString(),
+    };
+  }
   return Boolean(aiClient);
 }
 
@@ -88,8 +181,9 @@ function createSafeFallback(body = '', errorMessage = null) {
     category: 'Announcements',
     summary: sentences || 'Standard campus announcement with no critical actions specified.',
     priority: 'Medium',
-    priority_reason: 'Standard notice (fallback classification).',
+    priority_reason: 'Basic analysis (AI offline fallback).',
     deadline: null,
+    deadline_label: null,
     deadline_confidence: 'uncertain',
     required_action: null,
     needs_followup: false,
@@ -97,8 +191,9 @@ function createSafeFallback(body = '', errorMessage = null) {
     needs_action: false,
     reminder_note: null,
     status: errorMessage ? 'failed' : 'processed',
-    error: errorMessage,
+    error: errorMessage ? redactSecrets(errorMessage) : null,
     _source: 'fallback',
+    _model: 'fallback',
   };
 }
 
@@ -286,12 +381,17 @@ export function heuristicProcessor({ subject = '', body = '', sender = '', recei
     }
   }
 
+  const cleanDeadlineLabel = deadline
+    ? subject.replace(/^(?:re|fwd|urgent|mandatory|important|reminder|club event|placement notice)\s*[:&-]*\s*/gi, '').trim().slice(0, 60) || 'Scheduled Deadline'
+    : null;
+
   return {
     category,
     summary,
     priority,
     priority_reason,
     deadline,
+    deadline_label: cleanDeadlineLabel,
     deadline_confidence,
     required_action,
     needs_followup: Boolean(needs_followup || needs_reply || needs_action),
@@ -299,7 +399,9 @@ export function heuristicProcessor({ subject = '', body = '', sender = '', recei
     needs_action,
     reminder_note,
     status: 'processed',
+    error: null,
     _source: 'heuristic',
+    _model: 'heuristic',
   };
 }
 
@@ -324,7 +426,10 @@ function validateStructuredOutput(obj, refDate) {
     }
   } else {
     obj.deadline = null;
-    obj.deadline_confidence = 'confirmed';
+  }
+
+  if (obj.deadline_label !== null && obj.deadline_label !== undefined && typeof obj.deadline_label !== 'string') {
+    obj.deadline_label = null;
   }
 
   if (obj.required_action !== null && typeof obj.required_action !== 'string') {
@@ -346,6 +451,7 @@ function validateStructuredOutput(obj, refDate) {
 export async function processEmail({ subject = '', body = '', sender = '', receivedAt = new Date().toISOString() }) {
   const referenceTimestamp = new Date(receivedAt).toISOString();
   const refDate = new Date(referenceTimestamp);
+  const refWeekday = refDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
 
   if (!aiClient) {
     return heuristicProcessor({ subject, body, sender, receivedAt: referenceTimestamp });
@@ -354,19 +460,20 @@ export async function processEmail({ subject = '', body = '', sender = '', recei
   const systemPrompt = `You are Campus Cue's AI Email Analyst for university students.
 Analyze the student email and return ONLY a valid JSON object matching the requested schema.
 
-REFERENCE TIMESTAMP: ${referenceTimestamp}
+REFERENCE TIMESTAMP: ${referenceTimestamp} (${refWeekday})
 CRITICAL RULES:
-1. Relative dates (e.g. "today", "tomorrow", "this Friday", "by next Monday") MUST be resolved strictly relative to this reference timestamp.
+1. Relative dates (e.g. "today", "tomorrow", "this Friday", "by next Monday") MUST be resolved strictly relative to this reference timestamp (${refWeekday}). For example, if reference is Thursday Nov 12, 2026, "by this Friday" is Friday Nov 13, 2026.
 2. Vague or tentative dates (e.g. "early next week", "sometime soon", "tentatively planned", "pending venue approval"): MUST set deadline_confidence: "uncertain".
 3. Multiple dates in one email (e.g., event date vs registration cutoff): The deadline must be the student action deadline (when registration closes), NOT the event date!
 4. Reject dates more than 365 days away or with invalid years.
 5. High Priority: urgent academic schedules (exams, room shifts, submissions, attendance warnings) and valuable time-sensitive opportunities (placement drives, interview shortlists, internships).
 6. Low Priority: routine newsletters, club social digests, general mess/hostel maintenance circulars.
 7. Category must be exactly one of: "Academics", "Placements", "Clubs", "Events", "Announcements".
-8. required_action: concise sentence of what the student must do, or null.
-9. needs_reply: true if the email asks student to reply, confirm attendance, or pick a slot.
-10. needs_action: true if student must submit, register, attend, or complete a task.
-11. reminder_note: short sentence describing what to reply to or complete.`;
+8. deadline_label: specific concise 3-6 word label describing what the deadline is for (e.g. "CS301 Assignment 3 Submission", "Google SWE Slot Selection"), or null if no deadline exists. Never return a generic "Action Deadline".
+9. required_action: concise sentence of what the student must do, or null.
+10. needs_reply: true if the email asks student to reply, confirm attendance, or pick a slot.
+11. needs_action: true if student must submit, register, attend, or complete a task.
+12. reminder_note: short sentence describing what to reply to or complete.`;
 
   const userPrompt = `Sender: ${sender}
 Subject: ${subject}
@@ -378,13 +485,14 @@ ${body}`;
   let lastError = null;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const activeModel = attempt === 1 ? GEMINI_MODEL : GEMINI_FALLBACK_MODEL;
     try {
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Gemini API call timed out after 15s')), 15000)
+        setTimeout(() => reject(new Error('Gemini API call timed out after 25s')), 25000)
       );
 
       const generatePromise = aiClient.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: activeModel,
         contents: [
           { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
         ],
@@ -398,6 +506,7 @@ ${body}`;
               priority: { type: Type.STRING, enum: VALID_PRIORITIES },
               priority_reason: { type: Type.STRING },
               deadline: { type: Type.STRING, nullable: true },
+              deadline_label: { type: Type.STRING, nullable: true },
               deadline_confidence: { type: Type.STRING, enum: VALID_CONFIDENCES },
               required_action: { type: Type.STRING, nullable: true },
               needs_followup: { type: Type.BOOLEAN },
@@ -425,25 +534,39 @@ ${body}`;
       const parsed = JSON.parse(rawText);
       if (validateStructuredOutput(parsed, refDate)) {
         parsed._source = 'gemini';
+        parsed._model = activeModel;
         parsed.status = 'processed';
+        parsed.error = null;
+        if (!parsed.deadline_label && parsed.deadline) {
+          parsed.deadline_label = subject.trim().slice(0, 60);
+        }
+        lastAiProbe = { aiMode: 'live', model: activeModel, error: null, checkedAt: new Date().toISOString() };
         return parsed;
       } else {
         throw new Error('Gemini output failed schema validation');
       }
     } catch (err) {
-      lastError = err;
-      console.warn(`[emailProcessor] Attempt ${attempt} failed:`, err.message);
+      lastError = redactSecrets(err?.message || 'Unknown error');
+      console.warn(`[emailProcessor] Attempt ${attempt} (${activeModel}) failed:`, lastError);
 
-      if (err.message && err.message.includes('429')) {
+      if (/429/.test(lastError)) {
         await new Promise(r => setTimeout(r, 2000));
+      } else if (/API_KEY_INVALID|API key not valid|401|403|PERMISSION_DENIED/i.test(lastError)) {
+        break;
       } else if (attempt === 1) {
         await new Promise(r => setTimeout(r, 800));
       }
     }
   }
 
-  console.error('[emailProcessor] All Gemini attempts failed. Using safe zero-crash fallback.', lastError?.message);
-  return createSafeFallback(body, lastError?.message);
+  lastAiProbe = {
+    aiMode: 'offline',
+    model: GEMINI_MODEL,
+    error: lastError || 'Gemini processing failed.',
+    checkedAt: new Date().toISOString(),
+  };
+  console.error('[emailProcessor] All Gemini attempts failed. Using safe zero-crash fallback.', lastError);
+  return createSafeFallback(body, lastError);
 }
 
 /**
@@ -499,7 +622,7 @@ Generate a JSON object with:
 
   try {
     const res = await aiClient.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_MODEL,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         responseMimeType: 'application/json',

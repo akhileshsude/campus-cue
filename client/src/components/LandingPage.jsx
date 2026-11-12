@@ -68,7 +68,7 @@ export default function LandingPage({ onEnterApp }) {
 
           <button
             onClick={onEnterApp}
-            className="px-5 py-2.5 bg-forest hover:bg-forest-hover text-[#F1EBDD] text-sm font-medium rounded-xl transition-all shadow-xs"
+            className="px-5 py-2.5 bg-forest hover:bg-forest-hover text-[#F1EBDD] text-sm font-medium rounded-xl transition-all shadow-sm"
           >
             Get Started
           </button>
@@ -120,7 +120,7 @@ export default function LandingPage({ onEnterApp }) {
               </div>
 
               <div className="space-y-2.5 text-left">
-                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-2xs space-y-1">
+                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-sm space-y-1">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-red-100 text-red-800">
                       High Priority &middot; Exam
@@ -135,7 +135,7 @@ export default function LandingPage({ onEnterApp }) {
                   </p>
                 </div>
 
-                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-2xs space-y-1">
+                <div className="p-3 rounded-xl bg-cream-card border border-cream-border shadow-sm space-y-1">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-forest/10 text-forest">
                       Placement Action
@@ -201,9 +201,33 @@ export default function LandingPage({ onEnterApp }) {
             })}
           </div>
         </div>
+        {/* 4. About & Privacy Section */}
+        <div id="about" className="mt-16 pt-12 border-t border-cream-border grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="space-y-2">
+            <h2 className="font-serif text-2xl font-bold text-ink">
+              Built for real university inboxes
+            </h2>
+            <p className="text-sm text-ink-muted leading-relaxed">
+              Campus Cue works whether your college supports Gmail, Outlook, IMAP, .eml uploads, forwarding rules, or quick paste. Deadlines, scam checks, and action items stay private per student account.
+            </p>
+          </div>
+          <div id="faq" className="space-y-3">
+            <h2 className="font-serif text-2xl font-bold text-ink">
+              Frequently Asked Questions
+            </h2>
+            <div className="space-y-2 text-xs sm:text-sm text-ink-muted">
+              <p>
+                <strong className="text-ink">What if my college blocks third-party email apps?</strong> You can drag-and-drop <code>.eml</code> files, use auto-forwarding, or paste emails directly.
+              </p>
+              <p>
+                <strong className="text-ink">What happens if Gemini AI is offline?</strong> Emails are clearly marked as Basic analysis until AI comes back online so you always know what was AI-generated.
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
 
-      {/* 4. Deep Forest Green Footer Band */}
+      {/* 5. Deep Forest Green Footer Band */}
       <footer className="w-full bg-forest text-[#F1EBDD] py-14 px-6 lg:px-12 mt-16 border-t border-forest-light">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-6">
           <p className="font-serif text-2xl sm:text-3xl font-normal tracking-tight text-white/95">

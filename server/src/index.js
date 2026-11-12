@@ -16,6 +16,9 @@ import {
   validateAndSanitizeDate,
   reloadAiClient,
   isAiConfigured,
+  probeAiStatus,
+  getCachedAiHealth,
+  redactSecrets,
 } from '../services/emailProcessor.js';
 import { generateAcademicDigest, reloadDigestAiClient } from '../services/digestGenerator.js';
 import { detectProviderConfig, fetchImapMessages } from '../services/imapService.js';
@@ -30,7 +33,9 @@ import {
   isUuid,
   generateUuid,
   resolveUserId,
+  deriveDeadlineLabel,
   fetchAllEmailsFromDb,
+  findEmailByIdInDb,
   findByHashInDb,
   upsertEmailAndAnalysisToDb,
   updateEmailOverridesInDb,
@@ -38,7 +43,11 @@ import {
   updateEmailArchivedInDb,
   deleteEmailFromDb,
   syncReminderToDb,
+  updateReminderInDb,
+  findReminderByIdInDb,
   fetchRemindersFromDb,
+  upsertDigestToDb,
+  deleteUserTokenFromDb,
 } from '../services/supabaseStore.js';
 import {
   loadPersistedStore,
@@ -48,6 +57,8 @@ import {
   saveAttachmentFile,
   readAttachmentFile,
   deleteAttachmentFolder,
+  encryptString,
+  decryptString,
 } from '../services/localPersistence.js';
 
 dotenv.config();
@@ -87,6 +98,21 @@ let dataMode = initialStore.mode; // 'demo' | 'live'
 let memoryEmails = initialStore.emails;
 let memoryReminders = initialStore.reminders;
 let memoryDigest = initialStore.digest;
+const memoryDigestsByUser = new Map();
+const demoDisabledUsers = new Set();
+
+const VALID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidUserIdentity(id) {
+  return Boolean(id && id !== 'default_student' && VALID_EMAIL_RE.test(String(id).trim().toLowerCase()));
+}
+function requireUserIdentity(req, res) {
+  const candidate = resolveUserId(req);
+  if (!isValidUserIdentity(candidate)) {
+    res.status(401).json({ error: 'Unauthorized: valid x-user-email identity header is required.' });
+    return null;
+  }
+  return candidate;
+}
 
 // Multi-account connection registry (keyed by `${provider}:${email}`)
 const connectedAccounts = new Map(
@@ -171,8 +197,8 @@ async function restoreSavedTokensFromDb() {
         });
         privateAccountSecrets.set(key, {
           tokens: {
-            access_token: row.access_token,
-            refresh_token: row.refresh_token || undefined,
+            access_token: decryptString(row.access_token),
+            refresh_token: row.refresh_token ? decryptString(row.refresh_token) : undefined,
             expiry_date: row.token_expiry ? new Date(row.token_expiry).getTime() : undefined,
           },
         });
@@ -190,6 +216,58 @@ async function restoreSavedTokensFromDb() {
 }
 restoreSavedTokensFromDb();
 
+async function hydrateFromSupabase() {
+  if (!supabase) return;
+  try {
+    const dbEmails = await fetchAllEmailsFromDb(supabase);
+    if (Array.isArray(dbEmails) && (dbEmails.length > 0 || dataMode === 'live')) {
+      dataMode = 'live';
+      memoryEmails = dbEmails;
+      const dbReminders = await fetchRemindersFromDb(supabase, dbEmails);
+      if (Array.isArray(dbReminders)) {
+        memoryReminders = dbReminders;
+      }
+      persistAllLocal();
+      console.log(`🗄️ Hydrated ${memoryEmails.length} email(s) & ${memoryReminders.length} reminder(s) from Supabase.`);
+    }
+  } catch (err) {
+    console.warn('⚠️ Startup Supabase hydration failed:', err.message);
+  }
+}
+
+const dbReadyPromise = hydrateFromSupabase();
+probeAiStatus()
+  .then((probe) => {
+    console.log(`🤖 Initial AI probe: aiMode=${probe.aiMode}, model=${probe.model}${probe.error ? `, note=${probe.error}` : ''}`);
+  })
+  .catch(() => {});
+
+async function findOrLoadEmailIndex(id, userId) {
+  let idx = memoryEmails.findIndex(e => e.id === id && isEmailVisibleToUser(e, userId));
+  if (idx !== -1) return idx;
+  if (supabase && isUuid(id)) {
+    const dbEmail = await findEmailByIdInDb(supabase, id, userId);
+    if (dbEmail) {
+      memoryEmails.unshift(dbEmail);
+      return 0;
+    }
+  }
+  return -1;
+}
+
+async function findOrLoadReminderIndex(id, userId) {
+  let idx = memoryReminders.findIndex(r => r.id === id && (!r.user_id || r.user_id === userId));
+  if (idx !== -1) return idx;
+  if (supabase && isUuid(id)) {
+    const dbRem = await findReminderByIdInDb(supabase, id, userId);
+    if (dbRem) {
+      memoryReminders.unshift(dbRem);
+      return 0;
+    }
+  }
+  return -1;
+}
+
 function getEffectiveCategory(email) {
   return email.user_category || email.category || 'Announcements';
 }
@@ -204,29 +282,34 @@ function getEffectiveDeadline(email) {
 
 function getPublicConnectedAccounts(ownerFilter = '') {
   const all = Array.from(connectedAccounts.values());
-  if (!ownerFilter || ownerFilter === 'default_student') return all;
-  return all.filter(a => !a.ownerUserId || a.ownerUserId === 'default_student' || a.ownerUserId === ownerFilter || a.email === ownerFilter);
+  if (!ownerFilter) return [];
+  return all.filter(a => a.ownerUserId === ownerFilter || a.email === ownerFilter);
 }
 
 function isEmailVisibleToUser(email, userId) {
-  if (!userId || userId === 'default_student') return true;
-  if (email.source === 'sample' || String(email.id || '').startsWith('cue-')) return true;
-  if (!email.user_id || email.user_id === 'default_student') return true;
-  if (email.user_id === userId) return true;
-  if (email.recipient && email.recipient.toLowerCase() === userId) return true;
-  return false;
+  if (!userId || !isValidUserIdentity(userId)) return false;
+  if (email.source === 'sample' || String(email.id || '').startsWith('cue-')) {
+    return dataMode === 'demo' && !demoDisabledUsers.has(userId);
+  }
+  return String(email.user_id || '').toLowerCase() === userId;
 }
 
-function syncReminderForEmail(emailObj, aiResult) {
+async function syncReminderForEmail(emailObj, aiResult) {
   if (aiResult.needs_reply || aiResult.needs_action || aiResult.needs_followup) {
     const remIndex = memoryReminders.findIndex(r => (r.email_id || r.emailId) === emailObj.id);
     const existing = remIndex >= 0 ? memoryReminders[remIndex] : null;
-    const reminderId = existing?.id || `rem-${emailObj.id}`;
+    const reminderId =
+      existing?.id && isUuid(existing.id)
+        ? existing.id
+        : isUuid(emailObj.id)
+        ? generateUuid()
+        : existing?.id || `rem-${emailObj.id}`;
     const reminderType = aiResult.needs_reply ? 'reply' : 'action';
     const reminderNote = aiResult.reminder_note || aiResult.required_action || 'Action required';
 
     const reminderData = {
       id: reminderId,
+      user_id: emailObj.user_id || 'default_student',
       email_id: emailObj.id,
       emailId: emailObj.id,
       sender: emailObj.sender,
@@ -242,13 +325,16 @@ function syncReminderForEmail(emailObj, aiResult) {
       created_at: emailObj.received_at || new Date().toISOString(),
     };
 
+    const syncedId = await syncReminderToDb(supabase, reminderData);
+    if (syncedId && isUuid(syncedId)) {
+      reminderData.id = syncedId;
+    }
+
     if (remIndex >= 0) {
       memoryReminders[remIndex] = reminderData;
     } else {
       memoryReminders.unshift(reminderData);
     }
-
-    syncReminderToDb(supabase, reminderData);
   }
 }
 
@@ -278,7 +364,9 @@ async function ingestSingleEmail({
   const contentHash = computeContentHash(cleanSender, cleanSubject, cleanBody);
 
   if (!forceReprocess) {
-    const existingMem = memoryEmails.find(e => e.content_hash === contentHash);
+    const existingMem = memoryEmails.find(
+      e => e.content_hash === contentHash && (e.user_id || 'default_student') === userId
+    );
     if (existingMem) {
       return { email: existingMem, skipped: true };
     }
@@ -315,6 +403,12 @@ async function ingestSingleEmail({
       ? attachments
       : [];
 
+  const resolvedDeadlineLabel = aiResult.deadline
+    ? deriveDeadlineLabel(cleanSubject, aiResult.deadline_label)
+    : aiResult.deadline_label || null;
+  const resolvedSource = aiResult._source || 'heuristic';
+  const resolvedModel = aiResult._model || (resolvedSource === 'gemini' ? 'gemini-3.5-flash-lite' : resolvedSource);
+
   const newEmail = {
     id: newId,
     user_id: userId,
@@ -322,7 +416,7 @@ async function ingestSingleEmail({
     external_id: externalId,
     gmail_id: source === 'gmail' ? externalId : undefined,
     content_hash: contentHash,
-    recipient: recipient || (userId !== 'default_student' ? userId : null),
+    recipient: recipient || userId || null,
     sender: cleanSender,
     senderName: resolvedSenderName,
     subject: cleanSubject,
@@ -338,7 +432,7 @@ async function ingestSingleEmail({
     deadline: aiResult.deadline,
     user_deadline: null,
     deadline_completed: false,
-    deadline_label: aiResult.deadline ? 'Action Deadline' : null,
+    deadline_label: resolvedDeadlineLabel,
     deadline_confidence: aiResult.deadline_confidence,
     required_action: aiResult.required_action,
     needs_followup: aiResult.needs_followup,
@@ -346,16 +440,20 @@ async function ingestSingleEmail({
     needs_action: aiResult.needs_action,
     reminder_note: aiResult.reminder_note,
     summary: aiResult.summary,
+    analysis_source: resolvedSource,
+    model: resolvedModel,
+    status: aiResult.status || 'processed',
+    error: aiResult.error || null,
     edited_by_user: false,
     is_read: Boolean(isRead),
     is_archived: false,
-    ai_processed: true,
+    ai_processed: aiResult.status !== 'failed',
     processed_at: new Date().toISOString(),
   };
 
   memoryEmails.unshift(newEmail);
-  syncReminderForEmail(newEmail, aiResult);
   await upsertEmailAndAnalysisToDb(supabase, newEmail, userId);
+  await syncReminderForEmail(newEmail, aiResult);
 
   return { email: newEmail, skipped: false, aiResult };
 }
@@ -423,6 +521,23 @@ async function syncSingleGoogleAccount(key, userId) {
       secret.tokens = { ...secret.tokens, ...credentials };
       client.setCredentials(secret.tokens);
       persistSecretsLocal();
+      if (supabase && userId) {
+        try {
+          await supabase.from('user_tokens').upsert(
+            {
+              user_id: userId.toLowerCase(),
+              provider: 'google',
+              access_token: encryptString(secret.tokens.access_token),
+              refresh_token: secret.tokens.refresh_token ? encryptString(secret.tokens.refresh_token) : null,
+              token_expiry: secret.tokens.expiry_date ? new Date(secret.tokens.expiry_date).toISOString() : null,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'user_id,provider' }
+          );
+        } catch (dbErr) {
+          console.warn('⚠️ Supabase refreshed token sync error:', dbErr.message);
+        }
+      }
     } catch {
       // Proceed; API will catch invalid/revoked token cleanly
     }
@@ -531,19 +646,24 @@ async function syncSingleImapAccount(key, userId, limit = 15) {
 // Routes
 // ============================================================================
 
-app.get('/api/health', (req, res) => {
-  const userId = resolveUserId(req);
-  const accounts = getPublicConnectedAccounts(userId);
-  const geminiConfigured = isAiConfigured();
+app.get('/api/health', async (req, res) => {
+  await dbReadyPromise;
+  const candidate = resolveUserId(req);
+  const accounts = isValidUserIdentity(candidate) ? getPublicConnectedAccounts(candidate) : [];
+  const aiProbe = await probeAiStatus();
 
   res.json({
     status: 'ok',
     service: 'Campus Cue API',
     dataMode,
-    aiMode: geminiConfigured ? 'gemini' : 'heuristic',
+    aiMode: aiProbe.aiMode,
+    model: aiProbe.model,
+    aiModel: aiProbe.model,
+    aiError: aiProbe.error,
+    error: aiProbe.error,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-    geminiConfigured,
+    geminiConfigured: aiProbe.aiMode === 'live',
     supabaseConnected: Boolean(supabase),
     localPersistenceEnabled: process.env.DISABLE_LOCAL_PERSIST !== 'true',
     gmailConfigured: googleConfigured,
@@ -556,8 +676,8 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Configure or clear Gemini API Key at runtime (writes to gitignored server/.env & hot-reloads clients)
-app.post('/api/settings/ai-key', (req, res) => {
+// Configure or clear Gemini API Key at runtime (writes to gitignored server/.env & probes live AI)
+app.post('/api/settings/ai-key', async (req, res) => {
   const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
 
   if (rawKey && (rawKey.includes('your_gemini') || rawKey.length < 15)) {
@@ -565,7 +685,7 @@ app.post('/api/settings/ai-key', (req, res) => {
   }
 
   process.env.GEMINI_API_KEY = rawKey;
-  const active = reloadAiClient(rawKey);
+  reloadAiClient(rawKey);
   reloadDigestAiClient(rawKey);
 
   if (process.env.DISABLE_LOCAL_PERSIST !== 'true') {
@@ -590,30 +710,44 @@ app.post('/api/settings/ai-key', (req, res) => {
     }
   }
 
+  const aiProbe = await probeAiStatus();
+  const isLive = aiProbe.aiMode === 'live';
+
   res.json({
     success: true,
-    geminiConfigured: active,
-    aiMode: active ? 'gemini' : 'heuristic',
-    message: active
-      ? 'Gemini API key saved & activated immediately! You can click Run AI Pipeline to re-analyze emails.'
-      : 'Gemini API key cleared. Switched to offline heuristic engine.',
+    geminiConfigured: isLive,
+    aiMode: aiProbe.aiMode,
+    model: aiProbe.model,
+    aiModel: aiProbe.model,
+    aiError: aiProbe.error,
+    message: isLive
+      ? `Gemini key verified live on ${aiProbe.model}! You can reprocess any basic-analysis emails now.`
+      : rawKey
+      ? `Key saved, but AI probe stayed offline: ${aiProbe.error}`
+      : 'Gemini API key cleared. Switched to offline basic-analysis mode.',
   });
 });
 
 app.get('/api/emails', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { category, priority, status, unreadOnly, includeArchived, onlyArchived, page, limit } = req.query;
-  const userId = resolveUserId(req);
 
   try {
-    let sourceData = memoryEmails;
     if (supabase) {
-      const dbEmails = await fetchAllEmailsFromDb(supabase);
-      if (dbEmails && dbEmails.length > 0) {
-        sourceData = dbEmails;
+      const dbUserEmails = await fetchAllEmailsFromDb(supabase, userId);
+      if (Array.isArray(dbUserEmails)) {
+        if (dbUserEmails.length > 0) dataMode = 'live';
+        memoryEmails = [
+          ...dbUserEmails,
+          ...memoryEmails.filter(e => String(e.user_id || '').toLowerCase() !== userId),
+        ];
       }
     }
 
-    let results = sourceData.filter(e => isEmailVisibleToUser(e, userId));
+    let results = memoryEmails.filter(e => isEmailVisibleToUser(e, userId));
 
     if (onlyArchived === 'true') {
       results = results.filter(e => Boolean(e.is_archived));
@@ -646,7 +780,7 @@ app.get('/api/emails', async (req, res) => {
     }
 
     res.json({
-      dataMode,
+      dataMode: demoDisabledUsers.has(userId) ? 'live' : dataMode,
       emails: paginated,
       count: paginated.length,
       total,
@@ -662,8 +796,17 @@ app.get('/api/emails', async (req, res) => {
 });
 
 // Download attachment saved during .eml / IMAP ingestion
-app.get('/api/emails/:id/attachments/:filename', (req, res) => {
+app.get('/api/emails/:id/attachments/:filename', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id, filename } = req.params;
+  const idx = await findOrLoadEmailIndex(id, userId);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Email not found for active user' });
+  }
+
   const att = readAttachmentFile(id, filename);
   if (!att) {
     return res.status(404).json({
@@ -676,12 +819,18 @@ app.get('/api/emails/:id/attachments/:filename', (req, res) => {
 });
 
 app.post('/api/emails/process', async (req, res) => {
-  const { id, subject, body, sender, recipient, received_at, receivedAt, save_as_new, force_reprocess } = req.body;
-  const userId = resolveUserId(req, recipient);
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
 
+  const { id, subject, body, sender, recipient, received_at, receivedAt, save_as_new, force_reprocess } = req.body;
+
+  let emailIndex = -1;
   let targetEmail = null;
   if (id) {
-    targetEmail = memoryEmails.find(e => e.id === id);
+    emailIndex = await findOrLoadEmailIndex(id, userId);
+    if (emailIndex !== -1) targetEmail = memoryEmails[emailIndex];
+    else return res.status(404).json({ error: 'Email not found for active user' });
   }
 
   const emailToProcess = {
@@ -698,7 +847,8 @@ app.post('/api/emails/process', async (req, res) => {
   try {
     if (id && targetEmail) {
       const aiResult = await processEmail(emailToProcess);
-      const emailIndex = memoryEmails.findIndex(e => e.id === id);
+      const resolvedSource = aiResult._source || 'heuristic';
+      const resolvedModel = aiResult._model || (resolvedSource === 'gemini' ? 'gemini-3.5-flash-lite' : resolvedSource);
       const updated = {
         ...targetEmail,
         content_hash: computeContentHash(emailToProcess.sender, emailToProcess.subject, emailToProcess.body),
@@ -707,31 +857,39 @@ app.post('/api/emails/process', async (req, res) => {
         priority: aiResult.priority,
         priority_reason: aiResult.priority_reason,
         deadline: aiResult.deadline,
+        deadline_label: aiResult.deadline
+          ? deriveDeadlineLabel(emailToProcess.subject, aiResult.deadline_label)
+          : null,
         deadline_confidence: aiResult.deadline_confidence,
         required_action: aiResult.required_action,
         needs_followup: aiResult.needs_followup,
         needs_reply: aiResult.needs_reply,
         needs_action: aiResult.needs_action,
         reminder_note: aiResult.reminder_note,
-        ai_processed: true,
+        analysis_source: resolvedSource,
+        model: resolvedModel,
+        status: aiResult.status || 'processed',
+        error: aiResult.error || null,
+        ai_processed: aiResult.status !== 'failed',
         processed_at: new Date().toISOString(),
       };
 
       memoryEmails[emailIndex] = updated;
-      syncReminderForEmail(updated, aiResult);
-      memoryDigest = null;
+      await upsertEmailAndAnalysisToDb(supabase, updated, targetEmail.user_id || userId);
+      await syncReminderForEmail(updated, aiResult);
+      memoryDigestsByUser.delete(userId);
       persistAllLocal();
-      await upsertEmailAndAnalysisToDb(supabase, updated, userId);
 
       return res.json({ message: 'Email processed successfully with AI', email: updated, aiResult });
     }
 
     if (save_as_new) {
-      // Promote to live mode if user starts pasting real mail after clearing or directly ingesting
+      demoDisabledUsers.add(userId);
+      promoteToLiveModeIfNeeded();
       const result = await ingestSingleEmail({
         source: 'paste',
         sender: emailToProcess.sender,
-        recipient: recipient || null,
+        recipient: recipient || userId,
         subject: emailToProcess.subject,
         body: emailToProcess.body,
         receivedAt: emailToProcess.receivedAt,
@@ -740,9 +898,9 @@ app.post('/api/emails/process', async (req, res) => {
       });
 
       if (!result.skipped) {
-        memoryDigest = null;
-        persistAllLocal();
+        memoryDigestsByUser.delete(userId);
       }
+      persistAllLocal();
 
       if (result.skipped) {
         return res.json({
@@ -754,7 +912,11 @@ app.post('/api/emails/process', async (req, res) => {
       }
 
       return res.status(201).json({
-        message: 'Email ingested, analyzed and saved successfully',
+        message: result.email.status === 'failed'
+          ? 'Email saved, but AI analysis failed (basic fallback active)'
+          : result.email.analysis_source === 'gemini'
+          ? 'Email ingested, analyzed with Gemini and saved'
+          : 'Email saved with basic analysis (AI offline)',
         email: result.email,
         aiResult: result.aiResult,
       });
@@ -762,20 +924,24 @@ app.post('/api/emails/process', async (req, res) => {
 
     const aiResult = await processEmail(emailToProcess);
     res.json({
-      message: 'Email analyzed successfully with AI',
+      message: 'Email analyzed successfully',
       content_hash: computeContentHash(emailToProcess.sender, emailToProcess.subject, emailToProcess.body),
       aiResult,
     });
   } catch (err) {
     console.error('Error processing email with AI:', err);
-    res.status(500).json({ error: 'Failed to process email with AI', details: err.message });
+    res.status(500).json({ error: 'Failed to process email with AI', details: redactSecrets(err.message) });
   }
 });
 
 app.post('/api/emails/:id/reprocess', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
-  const userId = resolveUserId(req);
-  const targetEmail = memoryEmails.find(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
+  const targetEmail = emailIndex !== -1 ? memoryEmails[emailIndex] : null;
 
   if (!targetEmail) {
     return res.status(404).json({ error: 'Email not found to reprocess' });
@@ -789,7 +955,8 @@ app.post('/api/emails/:id/reprocess', async (req, res) => {
       receivedAt: targetEmail.received_at,
     });
 
-    const emailIndex = memoryEmails.findIndex(e => e.id === id);
+    const resolvedSource = aiResult._source || 'heuristic';
+    const resolvedModel = aiResult._model || (resolvedSource === 'gemini' ? 'gemini-3.5-flash-lite' : resolvedSource);
     const updated = {
       ...targetEmail,
       category: aiResult.category,
@@ -797,99 +964,169 @@ app.post('/api/emails/:id/reprocess', async (req, res) => {
       priority: aiResult.priority,
       priority_reason: aiResult.priority_reason,
       deadline: aiResult.deadline,
+      deadline_label: aiResult.deadline
+        ? deriveDeadlineLabel(targetEmail.subject, aiResult.deadline_label)
+        : null,
       deadline_confidence: aiResult.deadline_confidence,
       required_action: aiResult.required_action,
       needs_followup: aiResult.needs_followup,
       needs_reply: aiResult.needs_reply,
       needs_action: aiResult.needs_action,
       reminder_note: aiResult.reminder_note,
-      ai_processed: true,
+      analysis_source: resolvedSource,
+      model: resolvedModel,
+      status: aiResult.status || 'processed',
+      error: aiResult.error || null,
+      ai_processed: aiResult.status !== 'failed',
       processed_at: new Date().toISOString(),
     };
 
     memoryEmails[emailIndex] = updated;
-    syncReminderForEmail(updated, aiResult);
-    memoryDigest = null;
-    persistAllLocal();
     await upsertEmailAndAnalysisToDb(supabase, updated, targetEmail.user_id || userId);
-
-    res.json({ message: 'Email reprocessed successfully with AI', email: updated, aiResult });
-  } catch (err) {
-    console.error('Error reprocessing email:', err);
-    res.status(500).json({ error: 'Failed to reprocess email', details: err.message });
-  }
-});
-
-app.post('/api/emails/process-all', async (req, res) => {
-  const userId = resolveUserId(req);
-  try {
-    const visible = memoryEmails.filter(e => !e.is_archived && isEmailVisibleToUser(e, userId));
-    const results = [];
-    const BATCH_SIZE = 2;
-    const DELAY_BETWEEN_BATCHES_MS = 1200;
-
-    for (let i = 0; i < visible.length; i += BATCH_SIZE) {
-      const slice = visible.slice(i, i + BATCH_SIZE);
-      const batchPromises = slice.map(async (email) => {
-        const aiResult = await processEmail({
-          subject: email.subject,
-          body: email.body,
-          sender: email.sender,
-          receivedAt: email.received_at,
-        });
-
-        const updated = {
-          ...email,
-          category: aiResult.category,
-          summary: aiResult.summary,
-          priority: aiResult.priority,
-          priority_reason: aiResult.priority_reason,
-          deadline: aiResult.deadline,
-          deadline_confidence: aiResult.deadline_confidence,
-          required_action: aiResult.required_action,
-          needs_followup: aiResult.needs_followup,
-          needs_reply: aiResult.needs_reply,
-          needs_action: aiResult.needs_action,
-          reminder_note: aiResult.reminder_note,
-          ai_processed: true,
-          processed_at: new Date().toISOString(),
-        };
-
-        syncReminderForEmail(updated, aiResult);
-        await upsertEmailAndAnalysisToDb(supabase, updated, email.user_id || userId);
-        return updated;
-      });
-
-      const batchResults = await Promise.all(batchPromises);
-      for (const updated of batchResults) {
-        const idx = memoryEmails.findIndex(e => e.id === updated.id);
-        if (idx !== -1) memoryEmails[idx] = updated;
-        results.push(updated);
-      }
-
-      if (i + BATCH_SIZE < visible.length) {
-        await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES_MS));
-      }
-    }
-
-    memoryDigest = null;
+    await syncReminderForEmail(updated, aiResult);
+    memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.json({
-      message: `Batch processed ${results.length} emails with AI queue pacing`,
+      message: updated.status === 'failed'
+        ? 'Reprocess attempted, but Gemini AI failed'
+        : resolvedSource === 'gemini'
+        ? 'Email reprocessed successfully with Gemini AI'
+        : 'AI offline — basic heuristic analysis refreshed',
+      email: updated,
+      aiResult,
+    });
+  } catch (err) {
+    console.error('Error reprocessing email:', err);
+    res.status(500).json({ error: 'Failed to reprocess email', details: redactSecrets(err.message) });
+  }
+});
+
+async function runBatchReprocess(userId, { onlyBasic = false } = {}) {
+  if (supabase) {
+    const dbEmails = await fetchAllEmailsFromDb(supabase, userId);
+    if (Array.isArray(dbEmails)) {
+      memoryEmails = [
+        ...dbEmails,
+        ...memoryEmails.filter(e => String(e.user_id || '').toLowerCase() !== userId),
+      ];
+    }
+  }
+  const visible = memoryEmails.filter(e => {
+    if (e.is_archived || !isEmailVisibleToUser(e, userId)) return false;
+    if (!onlyBasic) return true;
+    return e.source !== 'sample' && (e.analysis_source !== 'gemini' || e.status === 'failed');
+  });
+
+  const results = [];
+  const BATCH_SIZE = 2;
+  const DELAY_BETWEEN_BATCHES_MS = 1200;
+
+  for (let i = 0; i < visible.length; i += BATCH_SIZE) {
+    const slice = visible.slice(i, i + BATCH_SIZE);
+    const batchPromises = slice.map(async (email) => {
+      const aiResult = await processEmail({
+        subject: email.subject,
+        body: email.body,
+        sender: email.sender,
+        receivedAt: email.received_at,
+      });
+
+      const resolvedSource = aiResult._source || 'heuristic';
+      const resolvedModel = aiResult._model || (resolvedSource === 'gemini' ? 'gemini-3.5-flash-lite' : resolvedSource);
+      const updated = {
+        ...email,
+        category: aiResult.category,
+        summary: aiResult.summary,
+        priority: aiResult.priority,
+        priority_reason: aiResult.priority_reason,
+        deadline: aiResult.deadline,
+        deadline_label: aiResult.deadline
+          ? deriveDeadlineLabel(email.subject, aiResult.deadline_label)
+          : null,
+        deadline_confidence: aiResult.deadline_confidence,
+        required_action: aiResult.required_action,
+        needs_followup: aiResult.needs_followup,
+        needs_reply: aiResult.needs_reply,
+        needs_action: aiResult.needs_action,
+        reminder_note: aiResult.reminder_note,
+        analysis_source: resolvedSource,
+        model: resolvedModel,
+        status: aiResult.status || 'processed',
+        error: aiResult.error || null,
+        ai_processed: aiResult.status !== 'failed',
+        processed_at: new Date().toISOString(),
+      };
+
+      await upsertEmailAndAnalysisToDb(supabase, updated, email.user_id || userId);
+      await syncReminderForEmail(updated, aiResult);
+      return updated;
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+    for (const updated of batchResults) {
+      const idx = memoryEmails.findIndex(e => e.id === updated.id);
+      if (idx !== -1) memoryEmails[idx] = updated;
+      results.push(updated);
+    }
+
+    if (i + BATCH_SIZE < visible.length) {
+      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES_MS));
+    }
+  }
+
+  memoryDigestsByUser.delete(userId);
+  persistAllLocal();
+  return results;
+}
+
+app.post('/api/emails/process-all', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
+  try {
+    const results = await runBatchReprocess(userId, { onlyBasic: false });
+    res.json({
+      message: `Batch processed ${results.length} emails with queue pacing`,
+      count: results.length,
       emails: results,
     });
   } catch (err) {
     console.error('Error batch processing emails:', err);
-    res.status(500).json({ error: 'Failed to batch process emails', details: err.message });
+    res.status(500).json({ error: 'Failed to batch process emails', details: redactSecrets(err.message) });
+  }
+});
+
+app.post('/api/emails/reprocess-basic', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
+  try {
+    const results = await runBatchReprocess(userId, { onlyBasic: true });
+    res.json({
+      message: results.length === 0
+        ? 'No basic-analysis or failed emails found to reprocess.'
+        : `Reprocessed ${results.length} basic/failed email(s)`,
+      count: results.length,
+      emails: results,
+    });
+  } catch (err) {
+    console.error('Error reprocessing basic emails:', err);
+    res.status(500).json({ error: 'Failed to reprocess basic emails', details: redactSecrets(err.message) });
   }
 });
 
 app.patch('/api/emails/:id/override', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
   const { category, priority, deadline, deadline_completed } = req.body;
 
-  const emailIndex = memoryEmails.findIndex(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
   if (emailIndex === -1) {
     return res.status(404).json({ error: 'Email not found' });
   }
@@ -923,7 +1160,7 @@ app.patch('/api/emails/:id/override', async (req, res) => {
     }
   }
 
-  memoryDigest = null;
+  memoryDigestsByUser.delete(userId);
   persistAllLocal();
 
   await updateEmailOverridesInDb(supabase, id, {
@@ -931,12 +1168,16 @@ app.patch('/api/emails/:id/override', async (req, res) => {
     user_priority: email.user_priority,
     user_deadline: email.user_deadline,
     deadline_completed: email.deadline_completed,
-  });
+  }, userId);
 
   res.json({ message: 'Student correction saved successfully', email });
 });
 
 app.patch('/api/emails/:id/category', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
   const { category } = req.body;
 
@@ -947,7 +1188,7 @@ app.patch('/api/emails/:id/category', async (req, res) => {
     return res.status(400).json({ error: 'Invalid category' });
   }
 
-  const emailIndex = memoryEmails.findIndex(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
   if (emailIndex === -1) {
     return res.status(404).json({ error: 'Email not found' });
   }
@@ -957,18 +1198,22 @@ app.patch('/api/emails/:id/category', async (req, res) => {
     targetCategory || memoryEmails[emailIndex].user_priority || memoryEmails[emailIndex].user_deadline
   );
 
-  memoryDigest = null;
+  memoryDigestsByUser.delete(userId);
   persistAllLocal();
-  await updateEmailOverridesInDb(supabase, id, { user_category: targetCategory });
+  await updateEmailOverridesInDb(supabase, id, { user_category: targetCategory }, userId);
 
   res.json({ message: 'User category override saved successfully', email: memoryEmails[emailIndex] });
 });
 
 app.patch('/api/emails/:id/read', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
   const { is_read } = req.body;
 
-  const emailIndex = memoryEmails.findIndex(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
   if (emailIndex === -1) {
     return res.status(404).json({ error: 'Email not found' });
   }
@@ -976,25 +1221,29 @@ app.patch('/api/emails/:id/read', async (req, res) => {
   const nextRead = is_read !== undefined ? Boolean(is_read) : !memoryEmails[emailIndex].is_read;
   memoryEmails[emailIndex].is_read = nextRead;
   persistAllLocal();
-  await updateEmailReadInDb(supabase, id, nextRead);
+  await updateEmailReadInDb(supabase, id, nextRead, userId);
 
   res.json({ message: 'Email read status updated', email: memoryEmails[emailIndex] });
 });
 
 app.patch('/api/emails/:id/archive', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
   const { is_archived } = req.body;
 
-  const emailIndex = memoryEmails.findIndex(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
   if (emailIndex === -1) {
     return res.status(404).json({ error: 'Email not found' });
   }
 
   const nextArchived = is_archived !== undefined ? Boolean(is_archived) : !memoryEmails[emailIndex].is_archived;
   memoryEmails[emailIndex].is_archived = nextArchived;
-  memoryDigest = null;
+  memoryDigestsByUser.delete(userId);
   persistAllLocal();
-  await updateEmailArchivedInDb(supabase, id, nextArchived);
+  await updateEmailArchivedInDb(supabase, id, nextArchived, userId);
 
   res.json({
     message: nextArchived ? 'Email archived' : 'Email restored to Inbox',
@@ -1003,44 +1252,67 @@ app.patch('/api/emails/:id/archive', async (req, res) => {
 });
 
 app.delete('/api/emails/:id', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
-  const emailIndex = memoryEmails.findIndex(e => e.id === id);
+  const emailIndex = await findOrLoadEmailIndex(id, userId);
   if (emailIndex === -1) {
     return res.status(404).json({ error: 'Email not found' });
   }
 
   memoryEmails.splice(emailIndex, 1);
   memoryReminders = memoryReminders.filter(r => (r.email_id || r.emailId) !== id);
-  memoryDigest = null;
+  memoryDigestsByUser.delete(userId);
   deleteAttachmentFolder(id);
   persistAllLocal();
-  await deleteEmailFromDb(supabase, id);
+  await deleteEmailFromDb(supabase, id, userId);
 
   res.json({ message: 'Email deleted permanently', id });
 });
 
-// Clear Showcase Samples -> Switch to Clean Real Inbox Mode
+// Clear Showcase Samples -> Switch to Clean Real Inbox Mode (never touches Supabase)
 app.post('/api/emails/clear-demo', (req, res) => {
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
+  demoDisabledUsers.add(userId);
   promoteToLiveModeIfNeeded();
+  memoryDigestsByUser.delete(userId);
   persistAllLocal();
   res.json({
     message: 'Sample showcase emails cleared. Campus Cue is now in Live Inbox Mode.',
-    dataMode,
-    emailsCount: memoryEmails.length,
+    dataMode: 'live',
+    emailsCount: memoryEmails.filter(e => isEmailVisibleToUser(e, userId)).length,
   });
 });
 
 app.post('/api/reset-demo', (req, res) => {
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
+  demoDisabledUsers.delete(userId);
   dataMode = 'demo';
-  memoryEmails = JSON.parse(JSON.stringify(sampleEmails.map(e => ({ ...e, source: 'sample', user_id: 'default_student' }))));
-  memoryReminders = JSON.parse(JSON.stringify(sampleReminders));
+  const nonSampleEmails = memoryEmails.filter(e => e.source !== 'sample' && !String(e.id || '').startsWith('cue-'));
+  const nonSampleIds = new Set(nonSampleEmails.map(e => e.id));
+  const nonSampleReminders = memoryReminders.filter(r => nonSampleIds.has(r.email_id || r.emailId));
+  memoryEmails = [
+    ...nonSampleEmails,
+    ...JSON.parse(JSON.stringify(sampleEmails.map(e => ({ ...e, source: 'sample', user_id: 'sample_showcase' })))),
+  ];
+  memoryReminders = [
+    ...nonSampleReminders,
+    ...JSON.parse(JSON.stringify(sampleReminders)),
+  ];
+  memoryDigestsByUser.delete(userId);
   memoryDigest = JSON.parse(JSON.stringify(sampleDigest));
   persistAllLocal();
 
   res.json({
     message: 'Demo state reset successfully to default showcase data',
     dataMode,
-    emailsCount: memoryEmails.length,
+    emailsCount: memoryEmails.filter(e => isEmailVisibleToUser(e, userId)).length,
     remindersCount: memoryReminders.length,
   });
 });
@@ -1049,30 +1321,45 @@ app.post('/api/reset-demo', (req, res) => {
 // Academic Command Center Digest Routes
 // ============================================================================
 
-app.get('/api/digest/today', async (req, res) => {
+async function handleGetTodayDigest(req, res) {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const todayStr = new Date().toISOString().split('T')[0];
   const studentName = req.query.studentName || '';
-  const userId = resolveUserId(req);
 
   try {
-    if (supabase && dataMode === 'live') {
-      const { data, error } = await supabase
-        .from('digests')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('date', todayStr)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+    if (supabase) {
+      const dbUserEmails = await fetchAllEmailsFromDb(supabase, userId);
+      if (Array.isArray(dbUserEmails)) {
+        if (dbUserEmails.length > 0) dataMode = 'live';
+        memoryEmails = [
+          ...dbUserEmails,
+          ...memoryEmails.filter(e => String(e.user_id || '').toLowerCase() !== userId),
+        ];
+      }
 
-      if (!error && data?.content) {
-        memoryDigest = data.content;
-        return res.json({ digest: data.content, source: 'supabase_cached', date: todayStr });
+      if (demoDisabledUsers.has(userId) || dataMode === 'live') {
+        const { data, error } = await supabase
+          .from('digests')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('date', todayStr)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && data?.content) {
+          memoryDigestsByUser.set(userId, data.content);
+          return res.json({ digest: data.content, source: 'supabase_cached', date: todayStr });
+        }
       }
     }
 
-    if (memoryDigest && memoryDigest.date === todayStr && (!studentName || memoryDigest.studentName === studentName)) {
-      return res.json({ digest: memoryDigest, source: 'memory_cached', date: todayStr });
+    const userCached = memoryDigestsByUser.get(userId);
+    if (userCached && userCached.date === todayStr && (!studentName || userCached.studentName === studentName)) {
+      return res.json({ digest: userCached, source: 'memory_cached', date: todayStr });
     }
 
     const activeEmails = memoryEmails.filter(e => !e.is_archived && isEmailVisibleToUser(e, userId));
@@ -1084,12 +1371,30 @@ app.get('/api/digest/today', async (req, res) => {
           overview: 'Your live inbox is currently empty. Connect an email account, upload .eml files, or paste an email to generate your daily briefing.',
           important_new_emails: [],
           upcoming_deadlines: [],
-          to_verify_deadlines: [],
+          uncertain_deadlines: [],
           urgent_announcements: [],
           placement_opportunities: [],
           pending_actions: [],
+          _source: 'empty',
+          model: 'none',
+          ai_error: null,
         },
         source: 'empty_live',
+        date: todayStr,
+      });
+    }
+
+    if (!demoDisabledUsers.has(userId) && dataMode === 'demo' && activeEmails.every(e => e.source === 'sample')) {
+      return res.json({
+        digest: {
+          ...sampleDigest,
+          date: todayStr,
+          studentName,
+          _source: 'heuristic',
+          model: 'sample',
+          ai_error: null,
+        },
+        source: 'sample_digest',
         date: todayStr,
       });
     }
@@ -1100,35 +1405,43 @@ app.get('/api/digest/today', async (req, res) => {
     });
     synthesized.studentName = studentName;
 
-    memoryDigest = synthesized;
+    memoryDigestsByUser.set(userId, synthesized);
     persistAllLocal();
 
-    if (supabase) {
-      try {
-        await supabase.from('digests').insert({ user_id: userId, date: todayStr, content: synthesized });
-      } catch (dbErr) {
-        console.warn('⚠️ Supabase digest insert error:', dbErr.message);
-      }
+    if (activeEmails.some(e => e.source !== 'sample')) {
+      await upsertDigestToDb(supabase, userId, todayStr, synthesized);
     }
 
     res.json({ digest: synthesized, source: 'generated', date: todayStr });
   } catch (err) {
     console.error('Error fetching today digest:', err);
-    res.status(500).json({ error: 'Failed to retrieve academic digest', details: err.message });
+    res.status(500).json({ error: 'Failed to retrieve academic digest', details: redactSecrets(err.message) });
   }
-});
+}
 
-app.get('/api/digest', (req, res) => {
-  const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  res.redirect(`/api/digest/today${qs}`);
-});
+app.get('/api/digest/today', handleGetTodayDigest);
+app.get('/api/digest', handleGetTodayDigest);
 
 app.post('/api/digest/generate', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { studentName } = req.body || {};
   const todayStr = new Date().toISOString().split('T')[0];
-  const userId = resolveUserId(req);
 
   try {
+    if (supabase) {
+      const dbUserEmails = await fetchAllEmailsFromDb(supabase, userId);
+      if (Array.isArray(dbUserEmails)) {
+        if (dbUserEmails.length > 0) dataMode = 'live';
+        memoryEmails = [
+          ...dbUserEmails,
+          ...memoryEmails.filter(e => String(e.user_id || '').toLowerCase() !== userId),
+        ];
+      }
+    }
+
     const activeEmails = memoryEmails.filter(e => !e.is_archived && isEmailVisibleToUser(e, userId));
     const digest = await generateAcademicDigest({
       structuredEmails: activeEmails,
@@ -1136,21 +1449,22 @@ app.post('/api/digest/generate', async (req, res) => {
     });
     digest.studentName = studentName || '';
 
-    memoryDigest = digest;
+    memoryDigestsByUser.set(userId, digest);
     persistAllLocal();
 
-    if (supabase) {
-      try {
-        await supabase.from('digests').insert({ user_id: userId, date: todayStr, content: digest });
-      } catch (dbErr) {
-        console.warn('⚠️ Supabase digest update error:', dbErr.message);
-      }
+    if (activeEmails.some(e => e.source !== 'sample')) {
+      await upsertDigestToDb(supabase, userId, todayStr, digest);
     }
 
-    res.json({ message: 'Academic digest refreshed successfully', digest });
+    res.json({
+      message: digest._source === 'gemini'
+        ? 'Academic digest refreshed with Gemini AI'
+        : 'Digest built with basic offline analysis',
+      digest,
+    });
   } catch (err) {
     console.error('Error generating academic digest:', err);
-    res.status(500).json({ error: 'Failed to generate academic digest', details: err.message });
+    res.status(500).json({ error: 'Failed to generate academic digest', details: redactSecrets(err.message) });
   }
 });
 
@@ -1159,12 +1473,27 @@ app.post('/api/digest/generate', async (req, res) => {
 // ============================================================================
 
 app.get('/api/reminders', async (req, res) => {
-  const userId = resolveUserId(req);
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   try {
     if (supabase) {
-      const dbReminders = await fetchRemindersFromDb(supabase, memoryEmails);
-      if (dbReminders && dbReminders.length > 0) {
-        memoryReminders = dbReminders;
+      const dbUserEmails = await fetchAllEmailsFromDb(supabase, userId);
+      if (Array.isArray(dbUserEmails)) {
+        if (dbUserEmails.length > 0) dataMode = 'live';
+        memoryEmails = [
+          ...dbUserEmails,
+          ...memoryEmails.filter(e => String(e.user_id || '').toLowerCase() !== userId),
+        ];
+      }
+      const userEmails = memoryEmails.filter(e => isEmailVisibleToUser(e, userId));
+      const dbUserReminders = await fetchRemindersFromDb(supabase, userEmails, userId);
+      if (Array.isArray(dbUserReminders)) {
+        memoryReminders = [
+          ...dbUserReminders,
+          ...memoryReminders.filter(r => String(r.user_id || '').toLowerCase() !== userId),
+        ];
       }
     }
 
@@ -1199,15 +1528,23 @@ app.get('/api/reminders', async (req, res) => {
 });
 
 app.patch('/api/reminders/:id', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id } = req.params;
   const { status, is_completed, snooze_days } = req.body;
 
-  const reminderIndex = memoryReminders.findIndex(r => r.id === id);
+  const reminderIndex = await findOrLoadReminderIndex(id, userId);
   if (reminderIndex === -1) {
     return res.status(404).json({ error: 'Reminder not found' });
   }
 
   const reminder = memoryReminders[reminderIndex];
+  const emailIdx = await findOrLoadEmailIndex(reminder.email_id || reminder.emailId, userId);
+  if (emailIdx === -1) {
+    return res.status(404).json({ error: 'Reminder not found for active user' });
+  }
 
   if (status) {
     reminder.status = status;
@@ -1228,16 +1565,10 @@ app.patch('/api/reminders/:id', async (req, res) => {
 
   persistAllLocal();
 
-  if (supabase && isUuid(id)) {
-    try {
-      await supabase
-        .from('reminders')
-        .update({ status: reminder.status, snoozed_until: reminder.snoozed_until })
-        .eq('id', id);
-    } catch (dbErr) {
-      console.warn('⚠️ Supabase reminder update error:', dbErr.message);
-    }
-  }
+  await updateReminderInDb(supabase, id, {
+    status: reminder.status,
+    snoozed_until: reminder.snoozed_until,
+  }, userId);
 
   res.json({ message: 'Reminder updated successfully', reminder });
 });
@@ -1284,7 +1615,10 @@ async function parseRawEmailBuffer(buffer, fallbackTitle = 'No Subject') {
 }
 
 app.post('/api/emails/upload-eml', upload.array('emlFiles', 15), async (req, res) => {
-  const userId = resolveUserId(req);
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No .eml or .mbox files provided in upload request' });
@@ -1305,13 +1639,14 @@ app.post('/api/emails/upload-eml', upload.array('emlFiles', 15), async (req, res
       }
     }
 
+    demoDisabledUsers.add(userId);
     promoteToLiveModeIfNeeded();
     const { newEmails, skippedCount } = await ingestBatchWithPacing(parsedItems, {
       source: 'eml',
       userId,
     });
 
-    if (newEmails.length > 0) memoryDigest = null;
+    if (newEmails.length > 0) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.status(201).json({
@@ -1333,6 +1668,8 @@ app.get('/api/emails/detect-provider', async (req, res) => {
 });
 
 app.post('/api/emails/connect-imap', async (req, res) => {
+  await dbReadyPromise;
+  const headerUser = resolveUserId(req);
   const { email, password, host, port, secure, limit } = req.body || {};
 
   if (!email || !password) {
@@ -1340,7 +1677,10 @@ app.post('/api/emails/connect-imap', async (req, res) => {
   }
 
   const normalizedEmail = email.trim().toLowerCase();
-  const ownerUserId = resolveUserId(req, normalizedEmail);
+  const ownerUserId = isValidUserIdentity(headerUser) ? headerUser : normalizedEmail;
+  if (!isValidUserIdentity(ownerUserId)) {
+    return res.status(401).json({ error: 'Unauthorized: valid x-user-email identity is required.' });
+  }
 
   try {
     const { account, messages } = await fetchImapMessages({
@@ -1369,18 +1709,19 @@ app.post('/api/emails/connect-imap', async (req, res) => {
     });
     persistSecretsLocal();
 
+    demoDisabledUsers.add(ownerUserId);
     promoteToLiveModeIfNeeded();
     const { newEmails, skippedCount } = await ingestBatchWithPacing(messages, {
       source: 'imap',
       userId: ownerUserId,
     });
 
-    memoryDigest = null;
+    memoryDigestsByUser.delete(ownerUserId);
     persistAllLocal();
 
     res.json({
       success: true,
-      dataMode,
+      dataMode: 'live',
       account: accountRecord,
       count: newEmails.length,
       fetchedCount: messages.length,
@@ -1394,11 +1735,16 @@ app.post('/api/emails/connect-imap', async (req, res) => {
 });
 
 app.post('/api/emails/sync-imap', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const targetEmail = (req.body?.email || '').trim().toLowerCase();
-  const userId = resolveUserId(req);
-  const imapKeys = Array.from(connectedAccounts.keys()).filter(
-    k => k.startsWith('imap:') && (!targetEmail || k === `imap:${targetEmail}`)
-  );
+  const imapKeys = Array.from(connectedAccounts.keys()).filter(k => {
+    const acc = connectedAccounts.get(k);
+    const owned = acc?.ownerUserId === userId || acc?.email === userId;
+    return k.startsWith('imap:') && owned && (!targetEmail || k === `imap:${targetEmail}`);
+  });
 
   if (imapKeys.length === 0) {
     return res.status(400).json({
@@ -1417,7 +1763,7 @@ app.post('/api/emails/sync-imap', async (req, res) => {
       totalSkipped += resSync.skipped;
     }
 
-    if (allSynced.length > 0) memoryDigest = null;
+    if (allSynced.length > 0) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.json({
@@ -1434,7 +1780,10 @@ app.post('/api/emails/sync-imap', async (req, res) => {
 
 // Unified Sync Across ALL Connected Accounts (Gmail OAuth + Microsoft OAuth + IMAP)
 app.post('/api/emails/sync-all', async (req, res) => {
-  const userId = resolveUserId(req);
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const accounts = getPublicConnectedAccounts(userId);
   if (accounts.length === 0) {
     return res.json({ success: true, count: 0, skippedCount: 0, message: 'No live email accounts connected yet.' });
@@ -1459,7 +1808,7 @@ app.post('/api/emails/sync-all', async (req, res) => {
     }
   }
 
-  if (allEmails.length > 0) memoryDigest = null;
+  if (allEmails.length > 0) memoryDigestsByUser.delete(userId);
   persistAllLocal();
 
   res.json({
@@ -1477,22 +1826,31 @@ app.post('/api/emails/sync-all', async (req, res) => {
   });
 });
 
-app.post('/api/emails/disconnect', (req, res) => {
+app.post('/api/emails/disconnect', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const email = (req.body?.email || '').trim().toLowerCase();
   const provider = (req.body?.provider || '').trim().toLowerCase();
-  const userId = resolveUserId(req);
 
   if (email && provider) {
     const key = `${provider}:${email}`;
-    connectedAccounts.delete(key);
-    privateAccountSecrets.delete(key);
+    const acc = connectedAccounts.get(key);
+    if (acc && (acc.ownerUserId === userId || acc.email === userId)) {
+      connectedAccounts.delete(key);
+      privateAccountSecrets.delete(key);
+      await deleteUserTokenFromDb(supabase, email, provider);
+    }
   } else if (email) {
     for (const key of Array.from(connectedAccounts.keys())) {
-      if (key.endsWith(`:${email}`)) {
+      const acc = connectedAccounts.get(key);
+      if (key.endsWith(`:${email}`) && (acc?.ownerUserId === userId || acc?.email === userId)) {
         connectedAccounts.delete(key);
         privateAccountSecrets.delete(key);
       }
     }
+    await deleteUserTokenFromDb(supabase, email);
   }
 
   persistSecretsLocal();
@@ -1502,6 +1860,7 @@ app.post('/api/emails/disconnect', (req, res) => {
 });
 
 app.post('/api/emails/inbound', async (req, res) => {
+  await dbReadyPromise;
   const configuredSecret = process.env.INBOUND_WEBHOOK_SECRET;
   if (configuredSecret) {
     const provided = req.headers['x-webhook-secret'] || req.query.secret || req.body?.secret;
@@ -1532,15 +1891,21 @@ app.post('/api/emails/inbound', async (req, res) => {
 
   const receivedAt = bodyPayload.date || bodyPayload.received_at || new Date().toISOString();
   const recipientStr = Array.isArray(to) ? to[0] : to;
-  const userId = resolveUserId(req, recipientStr);
+  const headerUser = resolveUserId(req);
+  const bodyUser = resolveUserId(req, recipientStr);
+  const userId = isValidUserIdentity(headerUser) ? headerUser : bodyUser;
+  if (!isValidUserIdentity(userId)) {
+    return res.status(401).json({ error: 'Unauthorized: valid x-user-email header or recipient email is required.' });
+  }
 
   try {
+    demoDisabledUsers.add(userId);
     promoteToLiveModeIfNeeded();
     const result = await ingestSingleEmail({
       source: 'webhook',
       externalId: bodyPayload.messageId || bodyPayload['Message-Id'] || null,
       sender: from,
-      recipient: recipientStr,
+      recipient: recipientStr || userId,
       subject,
       body: text,
       receivedAt: new Date(receivedAt).toISOString(),
@@ -1548,7 +1913,7 @@ app.post('/api/emails/inbound', async (req, res) => {
       userId,
     });
 
-    if (!result.skipped) memoryDigest = null;
+    if (!result.skipped) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.status(result.skipped ? 200 : 201).json({
@@ -1559,12 +1924,13 @@ app.post('/api/emails/inbound', async (req, res) => {
     });
   } catch (err) {
     console.error('Inbound webhook error:', err);
-    res.status(500).json({ error: 'Failed to process inbound webhook email', details: err.message });
+    res.status(500).json({ error: 'Failed to process inbound webhook email', details: redactSecrets(err.message) });
   }
 });
 
 // Batch Inbound Ingestion (for Browser Webmail Extension, Google Apps Script, & Forwarding batches)
 app.post('/api/emails/inbound-batch', async (req, res) => {
+  await dbReadyPromise;
   const configuredSecret = process.env.INBOUND_WEBHOOK_SECRET;
   if (configuredSecret) {
     const provided = req.headers['x-webhook-secret'] || req.query.secret || req.body?.secret;
@@ -1579,11 +1945,15 @@ app.post('/api/emails/inbound-batch', async (req, res) => {
   }
 
   const explicitUser = req.body?.userEmail || '';
-  const userId = resolveUserId(req, explicitUser);
+  const headerUser = resolveUserId(req);
+  const userId = isValidUserIdentity(headerUser) ? headerUser : resolveUserId(req, explicitUser);
+  if (!isValidUserIdentity(userId)) {
+    return res.status(401).json({ error: 'Unauthorized: valid x-user-email header or userEmail is required.' });
+  }
 
   const normalizedItems = rawList.slice(0, 30).map((item) => {
     const from = item.from || item.sender || 'Webmail Sender';
-    const to = item.to || item.recipient || explicitUser || null;
+    const to = item.to || item.recipient || explicitUser || userId;
     const subject = item.subject || 'No Subject';
     let text = item.text || item.body || '';
     if (!text && item.html) {
@@ -1608,13 +1978,14 @@ app.post('/api/emails/inbound-batch', async (req, res) => {
   });
 
   try {
+    demoDisabledUsers.add(userId);
     promoteToLiveModeIfNeeded();
     const { newEmails, skippedCount } = await ingestBatchWithPacing(normalizedItems, {
       source: 'webhook',
       userId,
     });
 
-    if (newEmails.length > 0) memoryDigest = null;
+    if (newEmails.length > 0) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.status(201).json({
@@ -1626,19 +1997,22 @@ app.post('/api/emails/inbound-batch', async (req, res) => {
     });
   } catch (err) {
     console.error('Inbound batch error:', err);
-    res.status(500).json({ error: 'Failed to process inbound batch', details: err.message });
+    res.status(500).json({ error: 'Failed to process inbound batch', details: redactSecrets(err.message) });
   }
 });
 
 // Connected Accounts & Auth Status
-app.get('/api/auth/status', (req, res) => {
-  const userId = resolveUserId(req);
+app.get('/api/auth/status', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const accounts = getPublicConnectedAccounts(userId);
   const googleAccounts = accounts.filter(a => a.provider === 'google');
   const microsoftAccounts = accounts.filter(a => a.provider === 'microsoft');
 
   res.json({
-    dataMode,
+    dataMode: demoDisabledUsers.has(userId) ? 'live' : dataMode,
     configured: googleConfigured,
     googleConfigured,
     microsoftConfigured: isMicrosoftOAuthConfigured(),
@@ -1728,8 +2102,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
           {
             user_id: profileEmail,
             provider: 'google',
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
+            access_token: encryptString(tokens.access_token),
+            refresh_token: tokens.refresh_token ? encryptString(tokens.refresh_token) : null,
             token_expiry: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
             updated_at: new Date().toISOString(),
           },
@@ -1755,11 +2129,16 @@ app.get('/api/auth/google/callback', async (req, res) => {
 });
 
 app.post('/api/emails/sync-gmail', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const requestedEmail = (req.body?.email || '').trim().toLowerCase();
-  const userId = resolveUserId(req, requestedEmail);
-  const googleKeys = Array.from(connectedAccounts.keys()).filter(
-    k => k.startsWith('google:') && (!requestedEmail || k === `google:${requestedEmail}`)
-  );
+  const googleKeys = Array.from(connectedAccounts.keys()).filter(k => {
+    const acc = connectedAccounts.get(k);
+    const owned = acc?.ownerUserId === userId || acc?.email === userId;
+    return k.startsWith('google:') && owned && (!requestedEmail || k === `google:${requestedEmail}`);
+  });
 
   if (!googleConfigured || googleKeys.length === 0) {
     return res.status(400).json({
@@ -1780,7 +2159,7 @@ app.post('/api/emails/sync-gmail', async (req, res) => {
       totalSkipped += r.skipped;
     }
 
-    if (allNewEmails.length > 0) memoryDigest = null;
+    if (allNewEmails.length > 0) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.json({
@@ -1855,8 +2234,8 @@ app.get('/api/auth/microsoft/callback', async (req, res) => {
           {
             user_id: profileEmail,
             provider: 'microsoft',
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
+            access_token: encryptString(tokens.access_token),
+            refresh_token: tokens.refresh_token ? encryptString(tokens.refresh_token) : null,
             token_expiry: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
             updated_at: new Date().toISOString(),
           },
@@ -1881,11 +2260,16 @@ app.get('/api/auth/microsoft/callback', async (req, res) => {
 });
 
 app.post('/api/emails/sync-microsoft', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const requestedEmail = (req.body?.email || '').trim().toLowerCase();
-  const userId = resolveUserId(req, requestedEmail);
-  const msKeys = Array.from(connectedAccounts.keys()).filter(
-    k => k.startsWith('microsoft:') && (!requestedEmail || k === `microsoft:${requestedEmail}`)
-  );
+  const msKeys = Array.from(connectedAccounts.keys()).filter(k => {
+    const acc = connectedAccounts.get(k);
+    const owned = acc?.ownerUserId === userId || acc?.email === userId;
+    return k.startsWith('microsoft:') && owned && (!requestedEmail || k === `microsoft:${requestedEmail}`);
+  });
 
   if (!isMicrosoftOAuthConfigured() || msKeys.length === 0) {
     return res.status(400).json({
@@ -1905,7 +2289,7 @@ app.post('/api/emails/sync-microsoft', async (req, res) => {
       totalSkipped += r.skipped;
     }
 
-    if (allNewEmails.length > 0) memoryDigest = null;
+    if (allNewEmails.length > 0) memoryDigestsByUser.delete(userId);
     persistAllLocal();
 
     res.json({
@@ -1916,14 +2300,19 @@ app.post('/api/emails/sync-microsoft', async (req, res) => {
       emails: allNewEmails,
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'Microsoft Sync Error', details: err.message });
+    res.status(500).json({ success: false, error: 'Microsoft Sync Error', details: redactSecrets(err.message) });
   }
 });
 
 // Smart AI Reply Drafter
 app.post('/api/emails/reply', async (req, res) => {
+  await dbReadyPromise;
+  const userId = requireUserIdentity(req, res);
+  if (!userId) return;
+
   const { id, intent, studentNotes, studentName, email: providedEmail } = req.body;
-  const targetEmail = memoryEmails.find(e => e.id === id) || providedEmail;
+  const emailIdx = id ? await findOrLoadEmailIndex(id, userId) : -1;
+  const targetEmail = (emailIdx !== -1 ? memoryEmails[emailIdx] : null) || providedEmail;
 
   if (!targetEmail) {
     return res.status(404).json({ error: 'Email not found to draft reply' });
@@ -1942,7 +2331,7 @@ app.post('/api/emails/reply', async (req, res) => {
 
     res.json(draft);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to generate reply draft', details: err.message });
+    res.status(500).json({ error: 'Failed to generate reply draft', details: redactSecrets(err.message) });
   }
 });
 

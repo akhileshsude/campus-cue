@@ -12,7 +12,8 @@
     "test:eml": "node scripts/testEmlParser.js",
     "test:college": "node tests/runCollegeTests.js",
     "test:endpoints": "node scripts/testEndpoints.js",
-    "test:http": "node scripts/testHttpRoutes.js"
+    "test:http": "node scripts/testHttpRoutes.js",
+    "db:check": "node scripts/dbCheck.js"
   },
   "dependencies": {
     "@google/genai": "^3.0.0",

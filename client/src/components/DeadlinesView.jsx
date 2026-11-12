@@ -3,6 +3,7 @@ import { Clock, Calendar, AlertTriangle, ArrowRight, CheckCircle2, Circle, Downl
 
 export default function DeadlinesView({ emails = [], reminders = [], onSelectEmail, onToggleDeadlineDone }) {
   const [activeTab, setActiveTab] = useState('upcoming'); // 'upcoming' | 'overdue' | 'completed'
+  const [exportNotice, setExportNotice] = useState(null);
 
   const deadlines = useMemo(() => {
     const now = new Date();
@@ -98,9 +99,10 @@ export default function DeadlinesView({ emails = [], reminders = [], onSelectEma
     );
 
     if (confirmedItems.length === 0) {
-      alert('No confirmed deadlines to export.');
+      setExportNotice('No confirmed active deadlines available to export.');
       return;
     }
+    setExportNotice(null);
 
     const events = confirmedItems.map((d) => {
       const start = new Date(d.effectiveDeadline);
@@ -166,7 +168,7 @@ export default function DeadlinesView({ emails = [], reminders = [], onSelectEma
           {/* Calendar Export Button */}
           <button
             onClick={handleExportICS}
-            className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-cream-card hover:bg-cream border border-cream-border text-forest flex items-center gap-1.5 transition-colors shadow-2xs"
+            className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-cream-card hover:bg-cream border border-cream-border text-forest flex items-center gap-1.5 transition-colors shadow-sm"
             title="Download .ics file for Google Calendar, Apple Calendar or Outlook"
           >
             <Download className="w-3.5 h-3.5" />
@@ -181,7 +183,7 @@ export default function DeadlinesView({ emails = [], reminders = [], onSelectEma
                 onClick={() => setActiveTab(tab)}
                 className={`px-3.5 py-1.5 rounded-xl text-xs sm:text-sm font-semibold capitalize transition-all ${
                   isSelected
-                    ? 'bg-forest text-[#F1EBDD] shadow-xs'
+                    ? 'bg-forest text-[#F1EBDD] shadow-sm'
                     : 'bg-cream-card text-ink-muted hover:text-ink border border-cream-border'
                 }`}
               >
@@ -191,6 +193,19 @@ export default function DeadlinesView({ emails = [], reminders = [], onSelectEma
           })}
         </div>
       </div>
+
+      {exportNotice && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-2">
+          <span>{exportNotice}</span>
+          <button
+            type="button"
+            onClick={() => setExportNotice(null)}
+            className="text-amber-800 hover:underline font-semibold"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Vertical Timeline Card */}
       <div className="editorial-card p-6 sm:p-8 space-y-6">

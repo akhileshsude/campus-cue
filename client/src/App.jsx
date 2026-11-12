@@ -27,6 +27,7 @@ export default function App() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [isProcessingSingle, setIsProcessingSingle] = useState(false);
@@ -241,6 +242,7 @@ export default function App() {
 
   const handleIngestEmail = async (rawEmail) => {
     setIsIngesting(true);
+    setActionError(null);
     try {
       const res = await apiFetch('/api/emails/process', {
         method: 'POST',
@@ -251,17 +253,32 @@ export default function App() {
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.email) {
-          await fetchData(false);
-          setSelectedEmail(data.email);
-          setCurrentView('detail');
-          setIsIngestModalOpen(false);
-        }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data.error || `Failed to process email (${res.status})`;
+        setActionError(msg);
+        return { ok: false, error: msg };
       }
+
+      if (data.skipped) {
+        await fetchData(false);
+        setIsIngestModalOpen(false);
+        setActionError('This email was already imported (skipped duplicate).');
+        return { ok: true, skipped: true };
+      }
+
+      if (data.email) {
+        await fetchData(false);
+        setSelectedEmail(data.email);
+        setCurrentView('detail');
+        setIsIngestModalOpen(false);
+      }
+      return { ok: true, email: data.email };
     } catch (err) {
+      const msg = err.message || 'Failed to ingest email';
       console.error('Failed to ingest email:', err);
+      setActionError(msg);
+      return { ok: false, error: msg };
     } finally {
       setIsIngesting(false);
     }
@@ -322,9 +339,14 @@ export default function App() {
             setSelectedEmail(prev => ({ ...prev, ...data.email }));
           }
         }
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setActionError(data.error || `Failed to save changes (${res.status})`);
+        await fetchData(showArchived);
       }
     } catch (err) {
       console.error('Failed to override email:', err);
+      setActionError(err.message || 'Failed to save changes');
     }
   };
 
@@ -334,19 +356,24 @@ export default function App() {
 
   const handleReprocessEmail = async (emailId) => {
     setIsProcessingSingle(true);
+    setActionError(null);
     try {
       const res = await apiFetch(`/api/emails/${emailId}/reprocess`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        const data = await res.json();
         if (data.email) {
           setEmails(prev => prev.map(e => (e.id === emailId ? data.email : e)));
           if (selectedEmail && selectedEmail.id === emailId) {
             setSelectedEmail(data.email);
           }
         }
+        await fetchData(showArchived);
+      } else {
+        setActionError(data.error || `Failed to reprocess email (${res.status})`);
       }
     } catch (err) {
       console.error('Failed to reprocess email:', err);
+      setActionError(err.message || 'Failed to reprocess email');
     } finally {
       setIsProcessingSingle(false);
     }
@@ -365,9 +392,13 @@ export default function App() {
           setCurrentView('inbox');
         }
         await fetchData(showArchived);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setActionError(data.error || `Failed to archive email (${res.status})`);
       }
     } catch (err) {
       console.error('Failed to archive email:', err);
+      setActionError(err.message || 'Failed to archive email');
     }
   };
 
@@ -380,9 +411,13 @@ export default function App() {
           setCurrentView('inbox');
         }
         await fetchData(showArchived);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setActionError(data.error || `Failed to delete email (${res.status})`);
       }
     } catch (err) {
       console.error('Failed to delete email:', err);
+      setActionError(err.message || 'Failed to delete email');
     }
   };
 
@@ -422,6 +457,19 @@ export default function App() {
     } finally {
       setIsProcessingAll(false);
     }
+  };
+
+  const handleReprocessBasic = async () => {
+    setActionError(null);
+    const res = await apiFetch('/api/emails/reprocess-basic', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data.error || `Failed to reprocess emails (${res.status})`;
+      setActionError(msg);
+      throw new Error(msg);
+    }
+    await fetchData(showArchived);
+    return data;
   };
 
   const handleToggleRead = async (id, isRead) => {
@@ -512,10 +560,23 @@ export default function App() {
             setIsIngestModalOpen(true);
           }}
           unreadCount={stats.unread}
+          remindersCount={stats.reminders}
         />
 
         {/* Content View Container */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto pb-24 md:pb-12">
+          {actionError && (
+            <div className="mb-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-3">
+              <span>{actionError}</span>
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                className="font-semibold text-amber-800 hover:underline shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           
           {loading && (
             <div className="space-y-8 animate-pulse" aria-label="Loading Campus Cue">
@@ -606,6 +667,7 @@ export default function App() {
                   onToggleRead={handleToggleRead}
                   onArchive={handleArchiveEmail}
                   onDelete={handleDeleteEmail}
+                  onReprocess={handleReprocessEmail}
                   showArchived={showArchived}
                   onToggleShowArchived={() => setShowArchived(prev => !prev)}
                   onOpenIngest={handleOpenConnectInbox}
@@ -669,6 +731,7 @@ export default function App() {
         onClearDemo={handleClearDemo}
         healthStatus={healthStatus}
         onHealthUpdated={() => fetchData(showArchived)}
+        onReprocessBasic={handleReprocessBasic}
       />
       <IngestModal
         isOpen={isIngestModalOpen}

@@ -24,7 +24,7 @@ import {
   Download
 } from 'lucide-react';
 import { useUser } from '../context/UserContext';
-import { apiFetch, apiUrl } from '../utils/api';
+import { apiFetch } from '../utils/api';
 
 const VALID_CATEGORIES = ['Academics', 'Placements', 'Clubs', 'Events', 'Announcements'];
 const VALID_PRIORITIES = ['High', 'Medium', 'Low'];
@@ -153,6 +153,33 @@ export default function EmailDetailView({
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const handleDownloadAttachment = async (attName) => {
+    try {
+      const res = await apiFetch(
+        `/api/emails/${email.id}/attachments/${encodeURIComponent(attName)}`
+      );
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', attName);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download attachment:', err);
+    }
+  };
+
+  const isFailedAnalysis = email.status === 'failed';
+  const isBasicAnalysis =
+    !isFailedAnalysis &&
+    email.source !== 'sample' &&
+    email.analysis_source &&
+    email.analysis_source !== 'gemini';
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200 max-w-4xl">
@@ -299,14 +326,74 @@ export default function EmailDetailView({
 
       {/* 5. Key Details (AI Summary Box with Student Overrides) */}
       <div className="editorial-card p-6 bg-cream-card/90 space-y-5 border-cream-border mt-8">
+        {isFailedAnalysis && (
+          <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-0.5 min-w-0 flex-1">
+              <p className="text-xs font-bold text-red-900">
+                AI analysis failed — showing safe fallback details
+              </p>
+              {email.error && (
+                <p className="text-[11px] text-red-800 break-words">
+                  {email.error}
+                </p>
+              )}
+            </div>
+            {onReprocess && (
+              <button
+                type="button"
+                onClick={() => onReprocess(email.id)}
+                disabled={isProcessingSingle}
+                className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isProcessingSingle ? 'animate-spin' : ''}`} />
+                <span>{isProcessingSingle ? 'Retrying...' : 'Retry AI'}</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {isBasicAnalysis && (
+          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-0.5 min-w-0 flex-1">
+              <p className="text-xs font-bold text-amber-900">
+                Basic analysis (AI offline)
+              </p>
+              <p className="text-[11px] text-amber-800 break-words">
+                {email.error || 'Classified with keyword rules because Gemini was unavailable.'}
+              </p>
+            </div>
+            {onReprocess && (
+              <button
+                type="button"
+                onClick={() => onReprocess(email.id)}
+                disabled={isProcessingSingle}
+                className="px-3 py-1.5 rounded-lg bg-amber-900 hover:bg-amber-950 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isProcessingSingle ? 'animate-spin' : ''}`} />
+                <span>{isProcessingSingle ? 'Processing...' : 'Reprocess with AI'}</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center justify-between pb-3 border-b border-cream-border/70">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="font-bold text-sm sm:text-base text-ink">
               Key Details (AI Summary)
             </span>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-forest text-gold">
-              AI-generated
-            </span>
+            {isFailedAnalysis ? (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-200">
+                AI Failed
+              </span>
+            ) : isBasicAnalysis ? (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-200">
+                Basic analysis (AI offline)
+              </span>
+            ) : (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-forest text-gold">
+                AI-generated
+              </span>
+            )}
             {hasAnyOverride && (
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sage/25 text-forest border border-sage/40">
                 Customized by you
@@ -493,14 +580,14 @@ export default function EmailDetailView({
               </div>
 
               {email.has_saved_attachments ? (
-                <a
-                  href={apiUrl(`/api/emails/${email.id}/attachments/${encodeURIComponent(attName)}`)}
-                  download={attName}
+                <button
+                  type="button"
+                  onClick={() => handleDownloadAttachment(attName)}
                   className="text-xs font-semibold text-forest hover:underline px-3 py-1.5 rounded-lg hover:bg-cream transition-colors inline-flex items-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Download</span>
-                </a>
+                </button>
               ) : (
                 <span className="text-[11px] font-medium text-ink-muted px-3 py-1.5">
                   Filename only

@@ -295,10 +295,16 @@ export default function HomeView({
                 <h2 className="font-bold text-sm sm:text-base text-ink">
                   AI Summary
                 </h2>
-                <span className="badge-info text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                  <Sparkles className="w-2.5 h-2.5 text-gold" />
-                  <span>AI-generated</span>
-                </span>
+                {digest?._source === 'gemini' ? (
+                  <span className="badge-info text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                    <Sparkles className="w-2.5 h-2.5 text-gold" />
+                    <span>AI-generated</span>
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+                    Basic analysis (AI offline)
+                  </span>
+                )}
               </div>
 
               {onRegenerateDigest && (
@@ -425,12 +431,12 @@ export default function HomeView({
                               {item.deadline_label || item.subject}
                             </p>
                             {Boolean(item.user_deadline) && (
-                              <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.2 rounded-full border border-sage/40 shrink-0">
+                              <span className="bg-sage/20 text-forest text-[9px] font-bold px-1.5 py-0.5 rounded-full border border-sage/40 shrink-0">
                                 Edited
                               </span>
                             )}
                           </div>
-                          <span className={`text-[10px] font-bold px-2 py-0.2 rounded-full shrink-0 ${badge.class}`}>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${badge.class}`}>
                             {badge.text}
                           </span>
                         </div>

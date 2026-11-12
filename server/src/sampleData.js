@@ -12,9 +12,75 @@ function quickHash(sender, subject, body) {
 }
 
 export const sampleDigest = {
-  date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }),
+  date: new Date().toISOString().split('T')[0],
   headline: "3 academic updates today — CS301 exam reschedule & project milestone",
+  overview: "CS301 midterm exam room allocation moved to Turing Auditorium (Room 101) for tomorrow morning, and Google SWE technical test slot confirmation closes tomorrow at 5:00 PM. Prof. Thorne also released rubric details for Friday's CS301 architecture doc submission.",
   summary: "CS301 midterm exam room allocation was moved to Turing Auditorium for tomorrow morning. Prof. Thorne released rubric details for Friday's architecture doc submission. Also, Math 204 office hours have shifted from Thursday to Friday afternoon.",
+  important_new_emails: [
+    {
+      email_id: "cue-001",
+      headline: "CS301 Midterm Room Shift -> Turing Auditorium 101",
+      takeaway: "Report by 8:40 AM tomorrow with physical university ID; automated zero otherwise.",
+    },
+    {
+      email_id: "cue-002",
+      headline: "Google SWE Summer 2027 Assessment Shortlist",
+      takeaway: "Select a 60-minute HackerRank coding slot before tomorrow at 5:00 PM.",
+    },
+  ],
+  upcoming_deadlines: [
+    {
+      email_id: "cue-001",
+      deadline: daysFromNow(1, -2),
+      event_name: "CS301 Midterm Exam",
+      days_left: 1,
+      urgency: "Urgent",
+    },
+    {
+      email_id: "cue-002",
+      deadline: daysFromNow(1, 5),
+      event_name: "Select Google SWE Assessment Slot",
+      days_left: 1,
+      urgency: "Urgent",
+    },
+  ],
+  uncertain_deadlines: [
+    {
+      email_id: "cue-003",
+      deadline_label: "Spring 2027 Independent Research Proposals",
+      notes: "Tentative proposal window — verify exact faculty submission cutoff.",
+    },
+  ],
+  urgent_announcements: [
+    {
+      email_id: "cue-001",
+      subject: "URGENT & MANDATORY: CS301 Midterm Exam Room Shift & Seating Allotment",
+      takeaway: "Moved from Hall B to Main Turing Auditorium (Room 101) due to HVAC maintenance.",
+      action: "Check portal seating row and report to Turing Auditorium 101 by 8:40 AM tomorrow.",
+    },
+  ],
+  placement_opportunities: [
+    {
+      email_id: "cue-002",
+      company_role: "Google SWE Summer 2027: Campus Shortlist & Technical Assessment",
+      deadline: daysFromNow(1, 5),
+      action: "Select a 60-minute assessment window before tomorrow at 5:00 PM.",
+    },
+  ],
+  pending_actions: [
+    {
+      email_id: "cue-001",
+      action: "Check portal seating row and report to Turing Auditorium 101 by 8:40 AM tomorrow.",
+      due_hint: "Tomorrow 8:40 AM",
+      type: "action",
+    },
+    {
+      email_id: "cue-002",
+      action: "Confirm preferred assessment slot on placement portal.",
+      due_hint: "Tomorrow 5:00 PM",
+      type: "reply",
+    },
+  ],
   actionItems: [
     "Confirm CS301 exam seat in Turing Auditorium 101 tomorrow at 9:00 AM.",
     "Push CS301 architecture diagram to GitHub repository before Friday 11:59 PM.",

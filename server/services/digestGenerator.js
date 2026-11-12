@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
+import { redactSecrets } from './emailProcessor.js';
 
 dotenv.config();
 
@@ -11,13 +12,16 @@ function initDigestAiClient(key) {
     try {
       return new GoogleGenAI({ apiKey: cleanKey });
     } catch (err) {
-      console.warn('⚠️ [digestGenerator] Could not initialize GoogleGenAI:', err.message);
+      console.warn('⚠️ [digestGenerator] Could not initialize GoogleGenAI:', redactSecrets(err.message));
     }
   }
   return null;
 }
 
 aiClient = initDigestAiClient(process.env.GEMINI_API_KEY || process.env.AI_API_KEY);
+
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.7-flash';
 
 export function reloadDigestAiClient(newKey) {
   aiClient = initDigestAiClient(newKey);
@@ -29,7 +33,7 @@ export function reloadDigestAiClient(newKey) {
  * Strictly respects the requirement that every item carries email_id and only confirmed deadlines
  * appear in upcoming_deadlines (uncertain dates go in uncertain_deadlines / "to verify").
  */
-function heuristicDigestBuilder(structuredEmails = [], studentName = '') {
+function heuristicDigestBuilder(structuredEmails = [], studentName = '', fallbackReason = null) {
   const nameGreeting = studentName ? `${studentName}, ` : '';
   const now = new Date();
 
@@ -127,7 +131,9 @@ function heuristicDigestBuilder(structuredEmails = [], studentName = '') {
     pending_actions: pendingActions,
     date: new Date().toISOString().split('T')[0],
     generated_at: new Date().toISOString(),
-    _source: 'heuristic',
+    _source: fallbackReason ? 'fallback' : 'heuristic',
+    model: fallbackReason ? 'fallback' : 'heuristic',
+    ai_error: fallbackReason ? redactSecrets(fallbackReason) : null,
   };
 }
 
@@ -147,12 +153,14 @@ export async function generateAcademicDigest({ structuredEmails = [], studentNam
       date: new Date().toISOString().split('T')[0],
       generated_at: new Date().toISOString(),
       _source: 'empty',
+      model: 'none',
+      ai_error: null,
     };
   }
 
   // If no Gemini client, run heuristic generator immediately
   if (!aiClient) {
-    return heuristicDigestBuilder(structuredEmails, studentName);
+    return heuristicDigestBuilder(structuredEmails, studentName, null);
   }
 
   // Prepare concise structured payload (DO NOT pass raw email bodies)
@@ -191,126 +199,136 @@ Today's Date: ${new Date().toISOString().split('T')[0]}
 Structured Email Data:
 ${JSON.stringify(structuredDigestInput, null, 2)}`;
 
-  try {
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Digest generation timed out')), 15000)
-    );
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const activeModel = attempt === 1 ? GEMINI_MODEL : GEMINI_FALLBACK_MODEL;
+    try {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Digest generation timed out after 25s')), 25000)
+      );
 
-    const generatePromise = aiClient.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            overview: { type: Type.STRING },
-            important_new_emails: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  headline: { type: Type.STRING },
-                  takeaway: { type: Type.STRING },
+      const generatePromise = aiClient.models.generateContent({
+        model: activeModel,
+        contents: [
+          { role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              overview: { type: Type.STRING },
+              important_new_emails: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    headline: { type: Type.STRING },
+                    takeaway: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'headline', 'takeaway'],
                 },
-                required: ['email_id', 'headline', 'takeaway'],
+              },
+              upcoming_deadlines: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    deadline: { type: Type.STRING },
+                    event_name: { type: Type.STRING },
+                    days_left: { type: Type.INTEGER },
+                    urgency: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'deadline', 'event_name', 'urgency'],
+                },
+              },
+              uncertain_deadlines: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    deadline_label: { type: Type.STRING },
+                    tentative_date: { type: Type.STRING },
+                    notes: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'deadline_label', 'notes'],
+                },
+              },
+              urgent_announcements: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    subject: { type: Type.STRING },
+                    takeaway: { type: Type.STRING },
+                    action: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'subject', 'takeaway'],
+                },
+              },
+              placement_opportunities: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    company_role: { type: Type.STRING },
+                    deadline: { type: Type.STRING, nullable: true },
+                    action: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'company_role'],
+                },
+              },
+              pending_actions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    email_id: { type: Type.STRING },
+                    action: { type: Type.STRING },
+                    due_hint: { type: Type.STRING },
+                    type: { type: Type.STRING },
+                  },
+                  required: ['email_id', 'action'],
+                },
               },
             },
-            upcoming_deadlines: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  deadline: { type: Type.STRING },
-                  event_name: { type: Type.STRING },
-                  days_left: { type: Type.INTEGER },
-                  urgency: { type: Type.STRING },
-                },
-                required: ['email_id', 'deadline', 'event_name', 'urgency'],
-              },
-            },
-            uncertain_deadlines: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  deadline_label: { type: Type.STRING },
-                  tentative_date: { type: Type.STRING },
-                  notes: { type: Type.STRING },
-                },
-                required: ['email_id', 'deadline_label', 'notes'],
-              },
-            },
-            urgent_announcements: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  subject: { type: Type.STRING },
-                  takeaway: { type: Type.STRING },
-                  action: { type: Type.STRING },
-                },
-                required: ['email_id', 'subject', 'takeaway'],
-              },
-            },
-            placement_opportunities: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  company_role: { type: Type.STRING },
-                  deadline: { type: Type.STRING, nullable: true },
-                  action: { type: Type.STRING },
-                },
-                required: ['email_id', 'company_role'],
-              },
-            },
-            pending_actions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  email_id: { type: Type.STRING },
-                  action: { type: Type.STRING },
-                  due_hint: { type: Type.STRING },
-                  type: { type: Type.STRING },
-                },
-                required: ['email_id', 'action'],
-              },
-            },
+            required: [
+              'overview',
+              'important_new_emails',
+              'upcoming_deadlines',
+              'uncertain_deadlines',
+              'urgent_announcements',
+              'placement_opportunities',
+              'pending_actions',
+            ],
           },
-          required: [
-            'overview',
-            'important_new_emails',
-            'upcoming_deadlines',
-            'uncertain_deadlines',
-            'urgent_announcements',
-            'placement_opportunities',
-            'pending_actions',
-          ],
         },
-      },
-    });
+      });
 
-    const response = await Promise.race([generatePromise, timeoutPromise]);
-    const rawText = response.text ? response.text.trim() : '';
-    const parsed = JSON.parse(rawText);
+      const response = await Promise.race([generatePromise, timeoutPromise]);
+      const rawText = response.text ? response.text.trim() : '';
+      const parsed = JSON.parse(rawText);
 
-    parsed.date = new Date().toISOString().split('T')[0];
-    parsed.generated_at = new Date().toISOString();
-    parsed._source = 'gemini';
-    return parsed;
-  } catch (err) {
-    console.warn('[digestGenerator] Gemini failed, falling back to heuristic builder:', err.message);
-    return heuristicDigestBuilder(structuredEmails, studentName);
+      parsed.date = new Date().toISOString().split('T')[0];
+      parsed.generated_at = new Date().toISOString();
+      parsed._source = 'gemini';
+      parsed.model = activeModel;
+      parsed.ai_error = null;
+      return parsed;
+    } catch (err) {
+      lastErr = redactSecrets(err?.message || 'Gemini digest failed');
+      console.warn(`[digestGenerator] Attempt ${attempt} (${activeModel}) failed:`, lastErr);
+      if (/API_KEY_INVALID|API key not valid|401|403|PERMISSION_DENIED/i.test(lastErr)) break;
+      if (attempt === 1) await new Promise(r => setTimeout(r, 800));
+    }
   }
+
+  return heuristicDigestBuilder(structuredEmails, studentName, lastErr || 'Gemini unavailable');
 }
 
 export default { generateAcademicDigest };

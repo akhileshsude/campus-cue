@@ -51,13 +51,15 @@ CREATE TABLE IF NOT EXISTS email_analysis (
     priority_reason TEXT,
     deadline TIMESTAMPTZ,
     user_deadline TIMESTAMPTZ,
+    deadline_label TEXT,
     deadline_completed BOOLEAN NOT NULL DEFAULT FALSE,
     deadline_confidence VARCHAR(20) DEFAULT 'confirmed' CHECK (deadline_confidence IN ('confirmed', 'uncertain')),
     required_action TEXT,
     needs_reply BOOLEAN NOT NULL DEFAULT FALSE,
     needs_action BOOLEAN NOT NULL DEFAULT FALSE,
     reminder_note TEXT,
-    model VARCHAR(100) DEFAULT 'gemini-2.5-flash',
+    source VARCHAR(30) NOT NULL DEFAULT 'gemini' CHECK (source IN ('gemini', 'heuristic', 'fallback')),
+    model VARCHAR(100) DEFAULT 'gemini-3.5-flash-lite',
     status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processed', 'failed')),
     error TEXT,
     processed_at TIMESTAMPTZ DEFAULT NOW(),
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS email_analysis (
 );
 
 ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS deadline_completed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS deadline_label TEXT;
+ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS source VARCHAR(30) NOT NULL DEFAULT 'gemini';
 
 -- ============================================================================
 -- 3. Reminders Table
@@ -72,12 +76,23 @@ ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS deadline_completed BOOLEAN N
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS reminders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL DEFAULT '',
     email_id UUID NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
     type VARCHAR(20) NOT NULL DEFAULT 'action' CHECK (type IN ('reply', 'action')),
     status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'snoozed')),
     snoozed_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_reminders_email UNIQUE (email_id)
 );
+
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '';
+DO $$
+BEGIN
+  DELETE FROM reminders a USING reminders b WHERE a.ctid < b.ctid AND a.email_id = b.email_id;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_reminders_email') THEN
+    ALTER TABLE reminders ADD CONSTRAINT uq_reminders_email UNIQUE (email_id);
+  END IF;
+END $$;
 
 -- ============================================================================
 -- 4. Academic Command Center Digests Table
@@ -93,7 +108,7 @@ CREATE TABLE IF NOT EXISTS digests (
 
 -- ============================================================================
 -- 5. User Auth & OAuth Tokens Table
--- Securely stores encrypted Google tokens for Gmail read-only sync.
+-- Stores AES-256-GCM encrypted Google / Microsoft OAuth tokens for inbox sync.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS user_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -108,10 +123,20 @@ CREATE TABLE IF NOT EXISTS user_tokens (
 );
 
 -- ============================================================================
+-- Row Level Security (Server queries strictly authenticate with service role key)
+-- ============================================================================
+ALTER TABLE emails ENABLE ROW LEVEL SECURITY;
+ALTER TABLE email_analysis ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reminders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE digests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_tokens ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================================
 -- 6. Unified View: v_emails_with_analysis
 -- Convenient view combining raw emails with their latest AI analysis & overrides.
 -- ============================================================================
-CREATE OR REPLACE VIEW v_emails_with_analysis AS
+DROP VIEW IF EXISTS v_emails_with_analysis;
+CREATE VIEW v_emails_with_analysis AS
 SELECT 
     e.id,
     e.user_id,
@@ -138,6 +163,7 @@ SELECT
     COALESCE(a.user_deadline, a.deadline) AS effective_deadline,
     a.deadline AS ai_deadline,
     a.user_deadline,
+    a.deadline_label,
     a.deadline_completed,
     a.deadline_confidence,
     a.summary,
@@ -145,6 +171,7 @@ SELECT
     a.needs_reply,
     a.needs_action,
     a.reminder_note,
+    a.source AS analysis_source,
     a.status AS analysis_status,
     a.error AS analysis_error,
     a.model AS analysis_model,

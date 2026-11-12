@@ -3,13 +3,14 @@ import { useUser, computeInitials, formatGreeting } from '../context/UserContext
 import { apiFetch } from '../utils/api';
 import { X, Check, User, Mail, Image, RotateCcw, Trash2, Activity, KeyRound, Eye, EyeOff, RefreshCw, Sparkles } from 'lucide-react';
 
-export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus = null, onHealthUpdated }) {
+export default function SettingsModal({ onResetDemo, onClearDemo, onReprocessBasic, healthStatus = null, onHealthUpdated }) {
   const { user, updateUser, isSettingsOpen, closeSettings, setIsFirstRunOpen } = useUser();
   const [name, setName] = useState(user.name || '');
   const [email, setEmail] = useState(user.email || '');
   const [avatarUrl, setAvatarUrl] = useState(user.avatarUrl || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isResettingDemo, setIsResettingDemo] = useState(false);
+  const [isReprocessingBasic, setIsReprocessingBasic] = useState(false);
   const [demoNoticeText, setDemoNoticeText] = useState('');
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [showGeminiKey, setShowGeminiKey] = useState(false);
@@ -150,7 +151,7 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Edit Name Field */}
           <div>
-            <label className="block text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+            <label className="text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
               <User className="w-3.5 h-3.5 text-forest" />
               <span>Full Name</span>
             </label>
@@ -169,7 +170,7 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
 
           {/* Email Field */}
           <div>
-            <label className="block text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+            <label className="text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
               <Mail className="w-3.5 h-3.5 text-forest" />
               <span>Email Address</span>
             </label>
@@ -184,7 +185,7 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
 
           {/* Avatar URL Field */}
           <div>
-            <label className="block text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+            <label className="text-xs font-bold text-ink uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
               <Image className="w-3.5 h-3.5 text-forest" />
               <span>Avatar Image URL <span className="text-ink-muted font-normal lowercase">(optional)</span></span>
             </label>
@@ -207,7 +208,13 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                 </p>
                 <div className="grid grid-cols-2 gap-1.5 text-[11px] text-ink-muted">
                   <span>
-                    AI Engine: <strong className="text-ink">{healthStatus.geminiConfigured ? 'Gemini Live' : 'Offline Heuristic'}</strong>
+                    AI Mode:{' '}
+                    <strong className={healthStatus.aiMode === 'live' ? 'text-forest' : 'text-amber-700'}>
+                      {healthStatus.aiMode === 'live' ? 'Live (AI Active)' : 'Offline (Basic Analysis)'}
+                    </strong>
+                  </span>
+                  <span>
+                    Model: <strong className="text-ink font-mono">{healthStatus.model || healthStatus.aiModel || 'gemini-3.5-flash-lite'}</strong>
                   </span>
                   <span>
                     Storage: <strong className="text-ink">{healthStatus.supabaseConnected ? 'Supabase DB' : 'Local Persistent Disk'}</strong>
@@ -215,10 +222,12 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                   <span>
                     Mode: <strong className="text-ink">{healthStatus.dataMode === 'live' ? 'Live Real Inbox' : 'Showcase Demo'}</strong>
                   </span>
-                  <span>
-                    Synced Accounts: <strong className="text-ink">{healthStatus.connectedAccountsCount || 0}</strong>
-                  </span>
                 </div>
+                {healthStatus.aiMode !== 'live' && healthStatus.aiError && (
+                  <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mt-1">
+                    Last AI Error: {healthStatus.aiError}
+                  </p>
+                )}
               </div>
             )}
 
@@ -230,11 +239,13 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                   <span>Gemini AI Key</span>
                 </label>
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  healthStatus?.geminiConfigured
+                  healthStatus?.aiMode === 'live'
                     ? 'bg-forest/15 text-forest'
-                    : 'bg-cream-card border border-cream-border text-ink-muted'
+                    : 'bg-amber-100 border border-amber-300 text-amber-800'
                 }`}>
-                  {healthStatus?.geminiConfigured ? 'Gemini Live' : 'Offline Heuristic'}
+                  {healthStatus?.aiMode === 'live'
+                    ? `Live · ${healthStatus.model || 'gemini-3.5-flash-lite'}`
+                    : 'Offline · Basic analysis'}
                 </span>
               </div>
 
@@ -245,9 +256,9 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                     value={geminiKeyInput}
                     onChange={(e) => setGeminiKeyInput(e.target.value)}
                     placeholder={
-                      healthStatus?.geminiConfigured
-                        ? 'Key active — paste new AIza... key to replace'
-                        : 'AIza... (paste free Google AI Studio key)'
+                      healthStatus?.aiMode === 'live'
+                        ? 'Key live — paste new key to replace'
+                        : 'Paste free Google AI Studio key'
                     }
                     className="w-full pl-3 pr-9 py-2 text-xs bg-cream-card border border-cream-border rounded-lg text-ink placeholder:text-ink-muted/60 focus:outline-none focus:border-forest font-mono"
                   />
@@ -274,7 +285,7 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                   )}
                   <span>
                     {isSavingAiKey
-                      ? 'Saving...'
+                      ? 'Testing...'
                       : geminiKeyInput.trim()
                       ? 'Activate Gemini'
                       : 'Switch to Offline'}
@@ -282,9 +293,34 @@ export default function SettingsModal({ onResetDemo, onClearDemo, healthStatus =
                 </button>
               </div>
 
-              <p className="text-[10px] text-ink-muted">
-                Saved locally to <code className="bg-cream-card px-1 rounded border border-cream-border">server/.env</code> and activated immediately without restarting.
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[10px] text-ink-muted">
+                  Saved locally to <code className="bg-cream-card px-1 rounded border border-cream-border">server/.env</code> and verified live.
+                </p>
+
+                {onReprocessBasic && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setIsReprocessingBasic(true);
+                      setAiKeyNotice(null);
+                      try {
+                        const resultMsg = await onReprocessBasic();
+                        setAiKeyNotice({ type: 'success', text: resultMsg || 'Reprocessed basic-analysis emails.' });
+                      } catch (err) {
+                        setAiKeyNotice({ type: 'error', text: err.message || 'Failed to reprocess basic emails.' });
+                      } finally {
+                        setIsReprocessingBasic(false);
+                      }
+                    }}
+                    disabled={isReprocessingBasic}
+                    className="text-[11px] font-bold text-forest hover:underline inline-flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isReprocessingBasic ? 'animate-spin' : ''}`} />
+                    <span>{isReprocessingBasic ? 'Reprocessing...' : 'Reprocess all basic-analysis emails'}</span>
+                  </button>
+                )}
+              </div>
 
               {aiKeyNotice && (
                 <p className={`text-[11px] font-semibold ${
