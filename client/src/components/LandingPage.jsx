@@ -171,7 +171,7 @@ export default function LandingPage({ onEnterApp }) {
         </div>
 
         {/* 3. "Why clg.inbox?" Feature Row */}
-        <div id="features" className="mt-20 lg:mt-28 pt-12 border-t border-cream-border">
+        <div id="features" className="mt-12 lg:mt-16 pt-12 border-t border-cream-border">
           <h2 className="font-serif text-2xl sm:text-3xl font-bold text-ink mb-8">
             Why clg.inbox?
           </h2>
